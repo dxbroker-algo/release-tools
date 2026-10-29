@@ -89,3 +89,31 @@ history() {
 	[ "$status" -ne 0 ]
 	[[ $output == *"no commit sets version 0.7.0"* ]] || false
 }
+
+@test "backfill-ext after the retro section landed: the first tag starts at its marker" {
+	history
+	first_bump=$(git log --format=%H -1 --grep='^feat: first public build')
+	# the retro section arrives in a PR long after the first bump commits
+	run "$RELEASE" render-history --write --through "$first_bump~1" --heading "Before 0.3.1"
+	[ "$status" -eq 0 ]
+	git add CHANGELOG.md
+	land "docs(changelog): the retro section (#10)"
+
+	run "$RELEASE" backfill-ext --kind store
+	[ "$status" -eq 0 ]
+	release_of v0.3.1 >"$FX/rel"
+	grep -q '^- feat: first public build' "$FX/rel"
+	! grep -q 'Initial commit' "$FX/rel" || false
+
+	git pull -q --ff-only origin master
+	run "$RELEASE" render '' v0.3.1
+	[ "$status" -eq 0 ]
+	[[ $output == *"- feat: first public build"* ]] || false
+	[[ $output != *"Initial commit"* ]] || false
+
+	# the entries above the retro section, which stays as written
+	[ "$(grep '^## ' CHANGELOG.md | tr '\n' '|')" = "## [0.5.0] — 2026-09-01|## [0.4.0] — 2026-07-20|## [0.3.1] — 2026-07-10|## Before 0.3.1|" ]
+	sed -n '/^## \[0.3.1\]/,/^## Before/p' CHANGELOG.md >"$FX/e"
+	! grep -q 'Initial commit' "$FX/e" || false
+	[ "$(sed -n '/^## Before/,$p' CHANGELOG.md | grep -c '^- ')" = 1 ]
+}

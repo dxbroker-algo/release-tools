@@ -275,13 +275,13 @@ setup() { setup_fixture; }
 }
 
 @test "dry run: renders the entry and the Slack text, writes nothing anywhere" {
-	pr 4 release:visual -- $'Intro\n\n## Release note\n<!-- one line for #releases -->\nBrokers can now export contacts.\n\n## Testing\nnone'
+	pr 4 release:visual -- $'Intro\n\n## Release note\n<!-- one line for #releases -->\nUsers can now export their data.\n\n## Testing\nnone'
 	land "feat(contacts): export (T-3) (#4)"
 	before=$(git -C "$ORIGIN" rev-parse master)
 	run "$RELEASE" cut --dry-run --version-file VERSION
 	[ "$status" -eq 0 ]
 	[[ $output == *"== CHANGELOG entry =="$'\n'"## [0.1.0] — 2026-10-29"* ]] || false
-	[[ $output == *"### Release notes"$'\n'"Brokers can now export contacts. ([#4](https://github.com/acme/widget/pull/4))"* ]] || false
+	[[ $output == *"### Release notes"$'\n'"Users can now export their data. ([#4](https://github.com/acme/widget/pull/4))"* ]] || false
 	[[ $output == *"== Slack =="$'\n'"🚀 *widget v0.1.0* is on prod — 1 feature"* ]] || false
 	[[ $output == *"📸 screenshots follow in this thread (release:visual on #4)"* ]] || false
 	[[ $output == *"CHANGELOG.md + VERSION, committed"* ]] || false

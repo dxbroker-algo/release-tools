@@ -40,7 +40,9 @@ Known types: `feat fix chore docs refactor test ci perf infra build style revert
   the other kinds do nothing.
 - **Every step is idempotent.** An existing tag is not cut again and an existing Release is not created
   again. An existing CHANGELOG entry is kept byte for byte. A Release that already records a post is
-  not posted again. A run that crashed between the tag and the post is finished by the next run.
+  not posted again. A run that crashed between the tag and the post is finished by the next run. One
+  edge: if the post succeeds but `gh release edit` then fails, the Release still reads `Slack: pending`,
+  and the next run at that sha posts a second time.
 - **The CHANGELOG commit** is made on the remote branch's head, never on the deployed sha. When a
   merge lands in between and the push is refused, the job fetches, regenerates on the new head and
   pushes again, three times. After that it gives up (the step goes red) and **the next release writes
@@ -54,12 +56,12 @@ Deployed `c7d34ad` · [CD run #292](…) · [Slack thread](…)
 
 ### Breaking
 ### Features
-- feat(settings): scope defaults in the registry (T-355) ([#318](…))
+- feat(api): add the thing (T-12) ([#4](…))
 ### Fixes
-- fix(ui): the table header (T-365) ([#319](…)) ⚠ visual review missing
+- fix(ui): mend the other thing (T-13) ([#5](…)) ⚠ visual review missing
 ### Other
 ### Release notes
-The `## Release note` section of a PR body, verbatim, one paragraph per PR ([#318](…))
+The `## Release note` section of a PR body, verbatim, one paragraph per PR ([#4](…))
 ```
 
 An empty section is left out. **The CHANGELOG is generated, so never edit it by hand.** A human-facing
@@ -67,16 +69,16 @@ line goes in the PR body:
 
 ```markdown
 ## Release note
-Brokers can now export their contacts as CSV.
+Users can now export their data as CSV.
 ```
 
 **The Slack post**, `chat.postMessage` (mrkdwn, unfurling off):
 
 ```
-🚀 *my-service v0.42.0* is on prod — 1 feature, 1 fix  (<Release> · <CD run #292> · `c7d34ad`)
-• feat(settings): scope defaults in the registry (T-355, #318)
-• fix(ui): the table header (T-365, #319)
-📸 screenshots follow in this thread (release:visual on #319)
+🚀 *widget v0.42.0* is on prod — 1 feature, 1 fix  (<Release> · <CD run #292> · `c7d34ad`)
+• feat(api): add the thing (T-12, #4)
+• fix(ui): mend the other thing (T-13, #5)
+📸 screenshots follow in this thread (release:visual on #5)
 ```
 
 It shows at most eight bullets and then `+ n more in the Release`. Kind `store` reads *is live on the
@@ -196,41 +198,35 @@ version at its bump commit, dated with that commit's date. Each gets a Release m
 `--latest=false`, and no post. The version the manifest carries now is left for `cut`. To see the
 plan first, run `release.sh backfill-ext --kind store --dry-run`.
 
-### A Terraform repository applied by hand (kind `apply`)
+### A Terraform repository applied by CD (kind `apply`)
 
-Here the unit is the apply. The operator runs the workflow after a successful apply, and the workflow
-contains nothing of Terraform and no cloud credential.
+Here the unit of release is the apply. CD applies master on merge, and a successful `apply` job is
+a release. Even a no-op apply, such as a docs merge, is one. The `release` job has the deploy
+section's shape. It holds no cloud credential, and nothing of Terraform runs in it.
 
 ```yaml
-name: release
-on:
-  workflow_dispatch:
-    inputs:
-      applied_sha: { description: "The applied master commit", required: true }
-      dry_run: { type: boolean, default: false }
-      version: { description: "Only for a hand-cut version such as 1.0.0", default: "" }
-permissions:
-  contents: write
-jobs:
   release:
+    needs: apply
+    if: needs.apply.result == 'success'
+    continue-on-error: true
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - uses: dxbroker-algo/release-tools/cut@<sha>
         with:
           kind: apply
-          sha: ${{ inputs.applied_sha }}
-          version: ${{ inputs.version }}
           version_file: VERSION
-          dry_run: ${{ inputs.dry_run }}
           slack_token: ${{ secrets.SLACK_RELEASES_BOT_TOKEN }}
           slack_channel: ${{ vars.SLACK_RELEASES_CHANNEL }}
 ```
 
-Run it after the apply, e.g. from a `make release` target:
-`gh workflow run release.yml -f applied_sha=$(git rev-parse HEAD)`.
+The tag goes on `github.sha`, the squash commit that was applied, and the post reads *is applied*.
+A failed apply cuts nothing.
 
 ### The PR-title check (every repository)
 

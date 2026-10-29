@@ -272,15 +272,22 @@ history_marker() {
 }
 
 # where the range of a release ending at $1 starts: the previous tag, else the
-# retro section's last commit, else the root (empty)
+# retro section's last commit, else the root (empty). The retro marker is read
+# at the branch head first: an extension's retro section lands long after its
+# first bump commits, where no CHANGELOG exists yet. Then at $1 itself.
 range_start() {
-	local end=$1 prev=$2 marker
+	local end=$1 prev=$2 marker ref
 	if [ -n "$prev" ]; then
 		echo "$prev"
 		return 0
 	fi
-	marker=$(history_marker "$end")
-	if [ -n "$marker" ] && git merge-base --is-ancestor "$marker" "$end" 2>/dev/null; then echo "$marker"; fi
+	for ref in ${BRANCH:+"refs/remotes/$REMOTE/$BRANCH"} "$end"; do
+		marker=$(history_marker "$ref")
+		if [ -n "$marker" ] && git merge-base --is-ancestor "$marker" "$end" 2>/dev/null; then
+			echo "$marker"
+			return 0
+		fi
+	done
 	return 0
 }
 
@@ -973,6 +980,7 @@ cut_existing() {
 
 cmd_render() {
 	init_context
+	resolve_branch
 	[ "$NPOS" -ge 1 ] || die "usage: release.sh render <from|''> <to>"
 	local from=$POS1 to=${POS2:-$POS1} end label date run_url="" run_label="" permalink="" body="$WORK/render.body"
 	[ "$NPOS" -ge 2 ] || from=""
