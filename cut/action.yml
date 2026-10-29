@@ -1,0 +1,106 @@
+name: release-tools cut
+description: >-
+  Cut a release after a successful deploy: the version from the squash titles, an annotated
+  tag on the shipped sha, a GitHub Release, one Slack post, CHANGELOG.md and the version file
+  committed to the default branch. Never touches the deploy.
+inputs:
+  kind:
+    description: "deploy (is on prod), store (is live on the Chrome Web Store) or apply (is applied)"
+    default: deploy
+  sha:
+    description: "The shipped commit. Default: github.sha. For kind store: the bump commit of `version`."
+    default: ""
+  version:
+    description: "An explicit X.Y.Z: 1.0.0 by hand, or the manifest's version for kind store."
+    default: ""
+  version_file:
+    description: "Bumped by the release commit: pyproject.toml, package.json, package-lock.json, VERSION…; space-separated; empty for none."
+    default: ""
+  name:
+    description: "The name in the Slack post. Default: the repository's name."
+    default: ""
+  branch:
+    description: "Where the release commit goes. Default: the remote's default branch."
+    default: ""
+  changelog:
+    description: "The changelog file."
+    default: CHANGELOG.md
+  dry_run:
+    description: "true: print the entry and the Slack text, write nothing."
+    default: "false"
+  backfill:
+    description: "kind store only: first tag every earlier manifest bump commit (retro, no Slack)."
+    default: "false"
+  bump_file:
+    description: "kind store: the file that carries `version: 'X.Y.Z'`."
+    default: manifest.config.ts
+  retro_note:
+    description: "backfill: the line each retro Release carries."
+    default: ""
+  github_token:
+    description: "Needs contents: write (the tag, the Release, the commit)."
+    default: ${{ github.token }}
+  slack_token:
+    description: "The Slack bot token (chat:write). Empty: the release is cut, the post is skipped."
+    default: ""
+  slack_channel:
+    description: "The Slack channel id."
+    default: ""
+outputs:
+  action:
+    description: "release, recovered, redeploy, noop or dry-run"
+    value: ${{ steps.cut.outputs.action }}
+  released:
+    description: "true when a new version was cut"
+    value: ${{ steps.cut.outputs.released }}
+  version:
+    description: "X.Y.Z"
+    value: ${{ steps.cut.outputs.version }}
+  tag:
+    description: "vX.Y.Z"
+    value: ${{ steps.cut.outputs.tag }}
+  release_url:
+    description: "The GitHub Release"
+    value: ${{ steps.cut.outputs.release_url }}
+  slack_ts:
+    description: "The post's ts: reply with thread_ts set to it"
+    value: ${{ steps.cut.outputs.slack_ts }}
+runs:
+  using: composite
+  steps:
+    - id: cut
+      shell: bash
+      env:
+        IN_KIND: ${{ inputs.kind }}
+        IN_SHA: ${{ inputs.sha || github.sha }}
+        IN_SHA_GIVEN: ${{ inputs.sha }}
+        IN_VERSION: ${{ inputs.version }}
+        IN_VERSION_FILE: ${{ inputs.version_file }}
+        IN_NAME: ${{ inputs.name }}
+        IN_BRANCH: ${{ inputs.branch }}
+        IN_CHANGELOG: ${{ inputs.changelog }}
+        IN_DRY_RUN: ${{ inputs.dry_run }}
+        IN_BACKFILL: ${{ inputs.backfill }}
+        IN_BUMP_FILE: ${{ inputs.bump_file }}
+        IN_RETRO_NOTE: ${{ inputs.retro_note }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        SLACK_RELEASES_BOT_TOKEN: ${{ inputs.slack_token }}
+        SLACK_RELEASES_CHANNEL: ${{ inputs.slack_channel }}
+      run: |
+        set -euo pipefail
+        script="$GITHUB_ACTION_PATH/../release.sh"
+        common=(--kind "$IN_KIND" --changelog "$IN_CHANGELOG" --bump-file "$IN_BUMP_FILE")
+        [ -z "$IN_NAME" ] || common+=(--name "$IN_NAME")
+        [ -z "$IN_BRANCH" ] || common+=(--branch "$IN_BRANCH")
+        [ "$IN_DRY_RUN" != true ] || common+=(--dry-run)
+        if [ "$IN_KIND" = store ] && [ "$IN_BACKFILL" = true ]; then
+          backfill=("${common[@]}")
+          [ -z "$IN_RETRO_NOTE" ] || backfill+=(--retro-note "$IN_RETRO_NOTE")
+          "$script" backfill-ext "${backfill[@]}"
+        fi
+        args=("${common[@]}")
+        # kind store finds the bump commit of the version itself
+        [ "$IN_KIND" = store ] && [ -z "$IN_SHA_GIVEN" ] || args+=(--sha "$IN_SHA")
+        [ -z "$IN_VERSION" ] || args+=(--version "$IN_VERSION")
+        for f in $IN_VERSION_FILE; do args+=(--version-file "$f"); done
+        "$script" cut "${args[@]}"

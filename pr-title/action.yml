@@ -1,0 +1,15 @@
+name: release-tools pr-title
+description: >-
+  Fail when the PR title does not read `type(scope)!: subject` with a known type. The title
+  becomes the squash title, which is the version bump and the release note.
+inputs:
+  title:
+    description: "The title to check."
+    default: ${{ github.event.pull_request.title }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TITLE: ${{ inputs.title }}
+      run: '"$GITHUB_ACTION_PATH/../release.sh" check-title "$TITLE"'

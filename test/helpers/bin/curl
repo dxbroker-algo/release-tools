@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# A stand-in for curl talking to Slack. Each call leaves args.N (its argv),
+# stdin.N (what came on stdin: the config carrying the token) and data.N (the
+# --data-binary file) under $CURL_LOG.
+set -eu
+n=$(($(find "$CURL_LOG" -name 'args.*' | wc -l) + 1))
+printf '%s\n' "$@" >"$CURL_LOG/args.$n"
+cat >"$CURL_LOG/stdin.$n"
+url=""
+for a in "$@"; do
+	case $a in
+	@*) cp "${a#@}" "$CURL_LOG/data.$n" ;;
+	esac
+	url=$a
+done
+if [ -n "${CURL_FAIL:-}" ]; then
+	echo "curl: (7) Failed to connect to slack.com port 443" >&2
+	exit 7
+fi
+case $url in
+*chat.postMessage)
+	if [ -n "${SLACK_POST_RESPONSE:-}" ]; then
+		printf '%s\n' "$SLACK_POST_RESPONSE"
+	else
+		echo '{"ok":true,"channel":"C0TEST","ts":"1730000000.000100"}'
+	fi
+	;;
+*chat.getPermalink)
+	echo '{"ok":true,"channel":"C0TEST","permalink":"https://acme.slack.com/archives/C0TEST/p1730000000000100"}'
+	;;
+*)
+	echo '{"ok":false,"error":"unknown_method"}'
+	;;
+esac
