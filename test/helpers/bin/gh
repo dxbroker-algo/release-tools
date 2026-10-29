@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# A stand-in for gh: PRs and Releases live as files under $GH_STATE.
+set -eu
+printf '%s\n' "$*" >>"$GH_STATE/calls.log"
+sub="$1 $2"
+shift 2
+notes=""
+tag=""
+while [ $# -gt 0 ]; do
+	case $1 in
+	--notes-file)
+		notes=$2
+		shift
+		;;
+	--repo | --json | --title | --target)
+		shift
+		;;
+	--*) ;;
+	*) [ -n "$tag" ] || tag=$1 ;;
+	esac
+	shift
+done
+case $sub in
+"pr view")
+	if [ -n "${GH_FAIL_PR:-}" ]; then
+		echo "HTTP 401: Bad credentials" >&2
+		exit 1
+	fi
+	if [ -f "$GH_STATE/pr-$tag.json" ]; then cat "$GH_STATE/pr-$tag.json"; else echo '{"labels":[],"body":""}'; fi
+	;;
+"release view")
+	[ -f "$GH_STATE/release-$tag.md" ] || {
+		echo "release not found" >&2
+		exit 1
+	}
+	jq -n --rawfile b "$GH_STATE/release-$tag.md" '{body: $b}'
+	;;
+"release create")
+	if [ -f "$GH_STATE/release-$tag.md" ]; then
+		echo "a release with the same tag name already exists" >&2
+		exit 1
+	fi
+	cp "$notes" "$GH_STATE/release-$tag.md"
+	;;
+"release edit")
+	[ -f "$GH_STATE/release-$tag.md" ] || {
+		echo "release not found" >&2
+		exit 1
+	}
+	cp "$notes" "$GH_STATE/release-$tag.md"
+	;;
+*)
+	echo "gh stub: unsupported: $sub" >&2
+	exit 2
+	;;
+esac
