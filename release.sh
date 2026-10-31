@@ -360,9 +360,12 @@ pr_has_label() {
 	jq -e --arg l "$2" '(.labels // []) | map(.name) | index($l) != null' "$WORK/pr-$1.json" >/dev/null
 }
 
-# the "## Release note" section of a PR body, without HTML comments
+# the "## Release note" section of a PR body, without HTML comments. The awk stops
+# at the next heading, so it reads a file: on a pipe, whatever was still writing
+# would take SIGPIPE, and pipefail would fail the release.
 pr_release_note() {
-	jq -r '.body // ""' "$WORK/pr-$1.json" | tr -d '\r' | awk '
+	jq -r '.body // ""' "$WORK/pr-$1.json" | tr -d '\r' >"$WORK/pr-$1.body"
+	awk '
 		/^##[ \t]+[Rr]elease [Nn]otes?[ \t]*$/ { ins = 1; next }
 		ins && /^#{1,2}[ \t]/ { exit }
 		ins {
@@ -383,7 +386,7 @@ pr_release_note() {
 			first = 0; last = 0
 			for (i = 1; i <= n; i++) if (l[i] ~ /[^ \t]/) { if (!first) first = i; last = i }
 			if (first) for (i = first; i <= last; i++) print l[i]
-		}'
+		}' "$WORK/pr-$1.body"
 }
 
 # ---------------------------------------------------------------- collect --
@@ -831,8 +834,10 @@ bump_commits() {
 	done 3<"$WORK/bumps"
 }
 
+# reads to the end: an awk that left at the match would take bump_commits down
+# with SIGPIPE on the next bump, and bump_commits lists a version only once
 bump_commit_of() { # version head
-	bump_commits "$2" | awk -v v="$1" '$2 == v { print $1; exit }'
+	bump_commits "$2" | awk -v v="$1" '$2 == v { print $1 }'
 }
 
 # ----------------------------------------------------------- subcommands --
