@@ -83,6 +83,14 @@ history() {
 	[ "$(slack_posts)" = 1 ]
 }
 
+@test "store: a version with later bumps resolves to its own commit" {
+	history
+	sha=$(git log --first-parent --format='%h %s' | sed -n 's/ feat: the sidebar; 0.4.0 (#3)$//p')
+	run "$RELEASE" cut --kind store --version 0.4.0 --dry-run
+	[ "$status" -eq 0 ]
+	[[ $output == *"tag v0.4.0 (annotated) on $sha,"* ]] || false
+}
+
 @test "store: a version no commit sets is refused" {
 	history
 	run "$RELEASE" cut --kind store --version 0.7.0

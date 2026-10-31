@@ -8,8 +8,9 @@ One script and two composite actions that turn a production deploy into a releas
 - **one Slack post** per release, whose `ts` is recorded in the Release so screenshots can go in its thread;
 - **`CHANGELOG.md` and the version file**, committed after the deploy as `chore(release): vX.Y.Z [skip ci]`.
 
-The release job runs **after** the deploy and can only read it. It holds `contents: write` and a Slack
-token, nothing else. When it fails, the deploy has already happened and stays green.
+The release job runs **after** the deploy and can only read it. It holds `contents: write`,
+`pull-requests: read` and a Slack token, nothing else. When it fails, the deploy has already happened
+and stays green.
 
 Nothing about a calling repository is stored here. Titles, labels and PR bodies are read from it at
 run time. Needs `bash`, `git`, `gh`, `jq` and `curl`, which every `ubuntu-latest` runner has.
@@ -129,6 +130,9 @@ the log, the outputs or the summary. A test holds this.
 
 The checkout must be full (`fetch-depth: 0`), and its token must be allowed to push the tag and the
 release commit (`permissions: contents: write`; `actions/checkout` keeps the credentials by default).
+It also needs `pull-requests: read`, because it reads each PR's labels and `## Release note` with
+`gh pr view`. Without it, a private repository's release is still cut, with a warning, but without
+the release notes and the `release:visual` line.
 A push made with `GITHUB_TOKEN` starts no workflow, and `[skip ci]` is a second guard, so the release
 commit cannot trigger the deploy again.
 
@@ -143,7 +147,8 @@ The `release` job comes after the job that deploys and smoke-tests prod:
     continue-on-error: true          # a red release never fails the deploy run
     runs-on: ubuntu-latest
     permissions:
-      contents: write                # the tag, the Release, the CHANGELOG commit; nothing else
+      contents: write                # the tag, the Release, the CHANGELOG commit
+      pull-requests: read            # the labels and the release notes
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
@@ -179,6 +184,7 @@ bump (inclusive). The version files are not touched.
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
@@ -212,6 +218,7 @@ section's shape. It holds no cloud credential, and nothing of Terraform runs in 
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
