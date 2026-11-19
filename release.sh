@@ -11,6 +11,8 @@
 #                   record it in the Release (the one edit a Release gets)
 #   backfill-ext    tag a browser extension's history at its manifest bump commits
 #   check-title T   exit 0 when T is a valid PR title (it becomes the squash title)
+#   post-merge      post one line per merge to the merge channel (staging), and
+#                   record the post's ts on the PR
 #
 # Needs bash 3.2+, git, gh, jq and curl. Nothing about the calling repository is
 # stored here: everything is read from it at run time. See README.md.
@@ -27,7 +29,7 @@ die() {
 }
 
 usage() {
-	sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
 	cat <<'EOF'
 
 Options (any subcommand):
@@ -57,8 +59,13 @@ Options (any subcommand):
   --bump-file PATH            backfill-ext / store: default manifest.config.ts
   --retro-note TEXT           backfill-ext: the line each retro Release carries
   --force                     post: post although the Release records a post
+  --before SHA                post-merge: the push's previous head; every merge in
+                              SHA..--sha is posted (default: --sha alone)
+  --migrations PATH           post-merge: a directory whose new files are
+                              migrations (alembic/versions); repeatable
 
-Environment: SLACK_RELEASES_BOT_TOKEN, SLACK_RELEASES_CHANNEL, SLACK_API_URL,
+Environment: SLACK_RELEASES_BOT_TOKEN, SLACK_RELEASES_CHANNEL (post-merge reads
+SLACK_MERGES_CHANNEL instead), SLACK_API_URL,
 GH_TOKEN, RELEASE_NOW (an ISO time, for tests), RELEASE_GIT_NAME/EMAIL.
 EOF
 }
@@ -84,6 +91,8 @@ WRITE=0
 BUMP_FILE=manifest.config.ts
 RETRO_NOTE=""
 FORCE=0
+BEFORE=""
+MIGRATIONS=""
 POS1=""
 POS2=""
 NPOS=0
@@ -100,7 +109,8 @@ parse_opts() {
 			exit 0
 			;;
 		--kind | --sha | --version | --version-file | --name | --repo | --branch | --remote | \
-			--changelog | --run-url | --run-label | --through | --heading | --bump-file | --retro-note)
+			--changelog | --run-url | --run-label | --through | --heading | --bump-file | --retro-note | \
+			--before | --migrations)
 			[ $# -ge 2 ] || die "$1 needs a value"
 			case $1 in
 			--kind) KIND=$2 ;;
@@ -118,6 +128,8 @@ parse_opts() {
 			--heading) HEADING=$2 ;;
 			--bump-file) BUMP_FILE=$2 ;;
 			--retro-note) RETRO_NOTE=$2 ;;
+			--before) BEFORE=$2 ;;
+			--migrations) MIGRATIONS="$MIGRATIONS $2" ;;
 			esac
 			shift
 			;;
@@ -562,10 +574,36 @@ slack_redeploy_text() { # label sha detail
 	printf '%s\n' "$s"
 }
 
+# slack_merge_text sha pr visual migrations-csv  (after parse_title on the subject)
+slack_merge_text() {
+	local sha=$1 pr=$2 visual=$3 migs=$4 title task="" s m rest
+	title=$(mrkdwn_escape "$P_DISPLAY" | tr '|' '¦')
+	if [ -n "$pr" ]; then s="<$REPO_URL/pull/$pr|$title>"; else s=$title; fi
+	[ "$P_VISUAL" != 1 ] || s="$s ⚠ visual review missing"
+	task=$(printf '%s\n' "$P_DISPLAY" | grep -Eo 'T-[0-9]+' | sed -n 1p || true)
+	[ -n "$task" ] || task=$(git log -1 --format=%b "$sha" | grep -Eo 'T-[0-9]+' | sed -n 1p || true)
+	s="🔀 $s"
+	[ -z "$task" ] || s="$s — $task"
+	s="$s · \`$(git rev-parse --short=7 "$sha")\`"
+	if [ -n "$migs" ]; then
+		rest=$migs
+		m=""
+		while [ -n "$rest" ]; do
+			m="$m, \`${rest%%,*}\`"
+			case $rest in *,*) rest=${rest#*,} ;; *) rest="" ;; esac
+		done
+		case $migs in *,*) s="$s · migrations ${m#, }" ;; *) s="$s · migration ${m#, }" ;; esac
+	fi
+	[ "$visual" != 1 ] || s="$s · 🖼 screenshots"
+	printf '%s\n' "$s"
+}
+
 # slack_post text: sets SLACK_TS SLACK_PERMALINK SLACK_ERROR. The token goes to
 # curl on stdin, never on its command line and never to the log.
 slack_post() {
-	local api=${SLACK_API_URL:-https://slack.com/api} channel=${SLACK_RELEASES_CHANNEL:-} resp
+	# SLACK_POST_CHANNEL, when set (even empty), replaces the releases channel: post-merge
+	# must never fall back to it, which is another channel once #releases is renamed.
+	local api=${SLACK_API_URL:-https://slack.com/api} channel=${SLACK_POST_CHANNEL-${SLACK_RELEASES_CHANNEL:-}} resp
 	SLACK_TS="" SLACK_PERMALINK="" SLACK_ERROR=""
 	if [ -z "${SLACK_RELEASES_BOT_TOKEN:-}" ]; then
 		SLACK_ERROR="no token"
@@ -1083,6 +1121,111 @@ cmd_post() {
 	[ -n "$SLACK_TS" ] || return 1
 }
 
+# ------------------------------------------------------------- post-merge --
+
+# the ids of the migrations $1 added under --migrations, comma separated: the
+# file's `revision = "…"`, else its name without the extension
+merge_migrations() {
+	local sha=$1 f id out="" p
+	[ -n "$MIGRATIONS" ] || return 0
+	if ! git rev-parse -q --verify "$sha^" >/dev/null 2>&1; then
+		warn "$(git rev-parse --short=7 "$sha") has no parent here (a shallow checkout?): migrations not read; check out with fetch-depth: 2"
+		return 0
+	fi
+	local paths=()
+	for p in $MIGRATIONS; do paths+=("$p"); done
+	git diff-tree -r --no-commit-id --name-only --diff-filter=A "$sha^" "$sha" -- "${paths[@]}" >"$WORK/mig.list"
+	while read -r f; do
+		[ -n "$f" ] || continue
+		git show "$sha:$f" >"$WORK/mig.file"
+		id=$(sed -nE "s/^revision(: *str)? *= *['\"]([^'\"]+)['\"].*/\2/p" "$WORK/mig.file" | sed -n 1p)
+		if [ -z "$id" ]; then
+			id=${f##*/}
+			id=${id%.*}
+		fi
+		out="$out,$id"
+	done <"$WORK/mig.list"
+	printf '%s' "${out#,}"
+}
+
+# the merges to post, oldest first: --before..sha when the push's previous head is
+# known here, else sha alone
+merge_commits() {
+	local head=$1
+	if [ -n "$BEFORE" ] && ! printf '%s' "$BEFORE" | grep -Eq '^0+$' &&
+		git cat-file -e "$BEFORE^{commit}" 2>/dev/null &&
+		git merge-base --is-ancestor "$BEFORE" "$head" 2>/dev/null; then
+		git log --first-parent --reverse -n 20 --format=%H "$BEFORE..$head" -- >"$WORK/merge.list"
+		if [ -s "$WORK/merge.list" ]; then
+			cat "$WORK/merge.list"
+			return 0
+		fi
+	fi
+	git rev-parse "$head"
+}
+
+# merge_already_posted pr sha: a re-run of the workflow must not post twice
+merge_already_posted() {
+	[ "$NO_GH" = 0 ] || return 1
+	if ! gh pr view "$1" --repo "$REPO" --json comments >"$WORK/comments-$1.json" 2>"$WORK/gh.err" </dev/null; then
+		warn "gh pr view $1: $(sed -n 1p "$WORK/gh.err"); cannot tell whether this merge was posted"
+		return 1
+	fi
+	jq -e --arg m "release-tools merge-post: sha=$2 " '[.comments[]? | (.body // "") | contains($m)] | any' \
+		"$WORK/comments-$1.json" >/dev/null
+}
+
+# merge_record pr sha: the ts goes on the PR, where the PM finds it to thread the screenshots
+merge_record() {
+	printf 'Posted to the merge channel: %s\n\n<!-- release-tools merge-post: sha=%s ts=%s -->\n' \
+		"$SLACK_PERMALINK" "$(git rev-parse "$2")" "$SLACK_TS" >"$WORK/record.md"
+	gh pr comment "$1" --repo "$REPO" --body-file "$WORK/record.md" >/dev/null </dev/null ||
+		warn "could not record the post's ts on PR #$1 (the job needs pull-requests: write)"
+}
+
+cmd_post_merge() {
+	init_context
+	[ "$NPOS" = 0 ] || die "usage: release.sh post-merge [--sha SHA] [--before SHA] [--migrations PATH]..."
+	local head sha subject pr migs visual posted=0 failed=0 text
+	head=$(git rev-parse --verify -q "${SHA:-HEAD}^{commit}") || die "unknown commit ${SHA:-HEAD}"
+	SLACK_POST_CHANNEL=${SLACK_MERGES_CHANNEL:-}
+	merge_commits "$head" >"$WORK/merges"
+	while read -r sha <&3; do
+		subject=$(git log -1 --format=%s "$sha")
+		case $subject in "chore(release):"*) continue ;; esac
+		parse_title "$subject"
+		pr=$P_PR
+		visual=0
+		if [ -n "$pr" ]; then
+			pr_fetch "$pr"
+			if pr_has_label "$pr" release:visual; then visual=1; fi
+		fi
+		migs=$(merge_migrations "$sha")
+		text=$(slack_merge_text "$sha" "$pr" "$visual" "$migs")
+		if [ "$DRY_RUN" = 1 ]; then
+			printf '== Slack ==\n%s\n' "$text"
+			continue
+		fi
+		if [ -n "$pr" ] && merge_already_posted "$pr" "$sha"; then
+			log "$(git rev-parse --short=7 "$sha") (#$pr) was already posted"
+			continue
+		fi
+		if slack_post "$text"; then
+			posted=$((posted + 1))
+			log "posted $(git rev-parse --short=7 "$sha") to Slack (ts $SLACK_TS)"
+			write_output slack_ts "$SLACK_TS"
+			summary "Merge post: $SLACK_PERMALINK"
+			if [ -n "$pr" ]; then merge_record "$pr" "$sha"; fi
+		else
+			failed=$((failed + 1))
+			warn "merge $(git rev-parse --short=7 "$sha") not posted: $SLACK_ERROR"
+		fi
+	done 3<"$WORK/merges"
+	write_output posted "$posted"
+	if [ "$failed" -gt 0 ]; then summary "Merge post failed for $failed merge(s)"; fi
+	return 0
+}
+
 cmd_backfill_ext() {
 	init_context
 	resolve_branch
@@ -1147,6 +1290,7 @@ main() {
 	render) cmd_render ;;
 	render-history) cmd_render_history ;;
 	post) cmd_post ;;
+	post-merge) cmd_post_merge ;;
 	backfill-ext) cmd_backfill_ext ;;
 	check-title) cmd_check_title ;;
 	-h | --help | help) usage ;;
