@@ -1,6 +1,6 @@
 # release-tools
 
-One script and two composite actions that turn a production deploy into a release:
+One script and three composite actions (`cut`, `pr-title`, `post-merge`) that turn a production deploy into a release:
 
 - **the version**, from the squash-merge titles since the last tag;
 - **an annotated tag `vX.Y.Z` on the commit that shipped**;
@@ -235,6 +235,68 @@ section's shape. It holds no cloud credential, and nothing of Terraform runs in 
 The tag goes on `github.sha`, the squash commit that was applied, and the post reads *is applied*.
 A failed apply cuts nothing.
 
+### The merge post (a repository that deploys staging on merge)
+
+`post-merge` is the last step of the workflow that deploys master to staging. It posts **one line per
+merge** to the merge channel, once staging has it, and records the post's `ts` on the PR. It is not a
+release: nothing is tagged.
+
+```
+🔀 <PR link|feat(api): add the thing (T-12)> — T-12 · `c7d34ad` · migration `a1b2c3d4` · 🖼 screenshots
+```
+
+- **The title** is the squash title, linked to its PR through the `(#N)` suffix. A commit without one is
+  posted unlinked. `[visual review missing]` moves to the end as `⚠ visual review missing`.
+- **The task** is the first `T-NNN` of the title, else of the squash body.
+- **`migration <id>`** (or `migrations a, b`) names the files the merge **added** under `migrations`
+  (`alembic/versions`): the file's `revision = "…"`, else its name without the extension. An edited
+  migration is not named. A **shallow checkout** has no parent to compare with, so it names none and
+  warns: check out with `fetch-depth: 2`.
+- **`🖼 screenshots`** when the PR carries `release:visual`. The screenshots go in this post's thread.
+- **`before`** is the push's previous head (`github.event.before`). Every merge in `before..sha` is
+  posted, oldest first, at most 20, so a train landed in one push is not reduced to its last commit.
+  A zero, unknown or non-ancestor `before` posts `sha` alone.
+- **The channel** is `SLACK_MERGES_CHANNEL`, **never** `SLACK_RELEASES_CHANNEL`: once `#releases` is
+  renamed, that variable names the other channel. The token is the same bot's `SLACK_RELEASES_BOT_TOKEN`.
+
+**Where the `ts` lives:** a PR comment, `Posted to the merge channel: <permalink>` and
+`<!-- release-tools merge-post: sha=<full sha> ts=1730000000.000100 -->`, and the job's `slack_ts`
+output and summary. To thread the screenshots:
+
+```sh
+gh pr view N -R OWNER/REPO --json comments -q '.comments[].body' | grep merge-post
+```
+
+Reply with `thread_ts` set to that `ts`. The same comment is what makes a **re-run of the workflow
+post nothing twice**: a merge whose sha is already recorded on its PR is skipped.
+
+**It is best effort,** like the release post. Slack refusing, a missing token or channel, or a comment
+that cannot be written is a warning on a step that exits 0, and the `posted` output says how many went
+out. It never fails the staging deploy.
+
+```yaml
+  merge-post:
+    needs: deploy                    # the job that deploys staging and smoke-tests it
+    if: needs.deploy.result == 'success'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write           # the ts is recorded as a PR comment
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 2
+      - uses: dxbroker-algo/release-tools/post-merge@<sha>
+        with:
+          migrations: alembic/versions         # backend only
+          slack_token: ${{ secrets.SLACK_RELEASES_BOT_TOKEN }}
+          slack_channel: ${{ vars.SLACK_MERGES_CHANNEL }}
+```
+
+With a `before` that is more than one commit back, check out `fetch-depth: 0` (a train's commits must be
+present to be read).
+
 ### The PR-title check (every repository)
 
 The PR title becomes the squash title, which in turn becomes the version bump and the release note:
@@ -297,10 +359,12 @@ release.sh render-history  [--through REF] [--heading TEXT] [--write]
 release.sh post            vX.Y.Z [--kind …] [--force] [--dry-run]
 release.sh backfill-ext    [--bump-file manifest.config.ts] [--retro-note TEXT] [--dry-run]
 release.sh check-title     'feat(scope): subject'
+release.sh post-merge      [--sha SHA] [--before SHA] [--migrations PATH]... [--dry-run]
 release.sh --help
 ```
 
-Environment: `SLACK_RELEASES_BOT_TOKEN`, `SLACK_RELEASES_CHANNEL`, `GH_TOKEN` (for `gh`),
+Environment: `SLACK_RELEASES_BOT_TOKEN`, `SLACK_RELEASES_CHANNEL` (`post-merge` reads
+`SLACK_MERGES_CHANNEL` instead), `GH_TOKEN` (for `gh`),
 `SLACK_API_URL` (tests), `RELEASE_NOW` (tests), `RELEASE_GIT_NAME` / `RELEASE_GIT_EMAIL` (the release
 commit's author, `github-actions[bot]` by default).
 

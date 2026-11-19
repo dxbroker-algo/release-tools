@@ -6,13 +6,22 @@ sub="$1 $2"
 shift 2
 notes=""
 tag=""
+fields=""
 while [ $# -gt 0 ]; do
 	case $1 in
 	--notes-file)
 		notes=$2
 		shift
 		;;
-	--repo | --json | --title | --target)
+	--json)
+		fields=$2
+		shift
+		;;
+	--body-file)
+		notes=$2
+		shift
+		;;
+	--repo | --title | --target)
 		shift
 		;;
 	--*) ;;
@@ -26,7 +35,23 @@ case $sub in
 		echo "HTTP 401: Bad credentials" >&2
 		exit 1
 	fi
-	if [ -f "$GH_STATE/pr-$tag.json" ]; then cat "$GH_STATE/pr-$tag.json"; else echo '{"labels":[],"body":""}'; fi
+	if [ "$fields" = comments ]; then
+		# the comments `pr comment` left, one file each
+		if [ -n "${GH_FAIL_COMMENTS:-}" ]; then
+			echo "HTTP 403: Resource not accessible" >&2
+			exit 1
+		fi
+		for f in "$GH_STATE"/comment-"$tag"-*; do
+			[ -f "$f" ] && jq -n --rawfile b "$f" '{body: $b}'
+		done | jq -s '{comments: .}'
+	elif [ -f "$GH_STATE/pr-$tag.json" ]; then cat "$GH_STATE/pr-$tag.json"; else echo '{"labels":[],"body":""}'; fi
+	;;
+"pr comment")
+	if [ -n "${GH_FAIL_COMMENTS:-}" ]; then
+		echo "HTTP 403: Resource not accessible by integration" >&2
+		exit 1
+	fi
+	cp "$notes" "$GH_STATE/comment-$tag-$(find "$GH_STATE" -name "comment-$tag-*" | wc -l | tr -d ' ')"
 	;;
 "release view")
 	[ -f "$GH_STATE/release-$tag.md" ] || {
