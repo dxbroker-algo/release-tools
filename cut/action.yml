@@ -5,7 +5,7 @@ description: >-
   committed to the default branch. Never touches the deploy.
 inputs:
   kind:
-    description: "deploy (is on prod), store (is live on the Chrome Web Store) or apply (is applied)"
+    description: "deploy (is on prod), store (is live on the Chrome Web Store), apply (is applied) or hotfix (is on prod as a patch of the release prod runs: no CHANGELOG commit)"
     default: deploy
   sha:
     description: "The shipped commit. Default: github.sha. For kind store: the bump commit of `version`."
@@ -36,6 +36,18 @@ inputs:
     default: manifest.config.ts
   retro_note:
     description: "backfill: the line each retro Release carries."
+    default: ""
+  base:
+    description: "kind hotfix: the release the hotfix patches, vX.Y.Z. Optional: it must be the release the sha sits on, else the cut is refused."
+    default: ""
+  reason:
+    description: "kind hotfix, required: why, usually the urgent thread's link."
+    default: ""
+  by:
+    description: "kind hotfix: who triggered it, as the post reads it. Default: the actor."
+    default: ""
+  suite:
+    description: "kind hotfix: the post's `suite:` line. Empty: no line."
     default: ""
   github_token:
     description: "Needs contents: write (the tag, the Release, the commit)."
@@ -83,6 +95,10 @@ runs:
         IN_BACKFILL: ${{ inputs.backfill }}
         IN_BUMP_FILE: ${{ inputs.bump_file }}
         IN_RETRO_NOTE: ${{ inputs.retro_note }}
+        IN_BASE: ${{ inputs.base }}
+        IN_REASON: ${{ inputs.reason }}
+        IN_BY: ${{ inputs.by }}
+        IN_SUITE: ${{ inputs.suite }}
         GH_TOKEN: ${{ inputs.github_token }}
         SLACK_RELEASES_BOT_TOKEN: ${{ inputs.slack_token }}
         SLACK_RELEASES_CHANNEL: ${{ inputs.slack_channel }}
@@ -103,4 +119,8 @@ runs:
         [ "$IN_KIND" = store ] && [ -z "$IN_SHA_GIVEN" ] || args+=(--sha "$IN_SHA")
         [ -z "$IN_VERSION" ] || args+=(--version "$IN_VERSION")
         for f in $IN_VERSION_FILE; do args+=(--version-file "$f"); done
+        [ -z "$IN_BASE" ] || args+=(--base "$IN_BASE")
+        [ -z "$IN_REASON" ] || args+=(--reason "$IN_REASON")
+        [ -z "$IN_BY" ] || args+=(--by "$IN_BY")
+        [ -z "$IN_SUITE" ] || args+=(--suite "$IN_SUITE")
         "$script" cut "${args[@]}"
