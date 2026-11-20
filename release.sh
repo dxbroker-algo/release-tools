@@ -3,7 +3,7 @@
 #
 #   cut             the version, an annotated tag on the shipped sha, a GitHub
 #                   Release, one Slack post, then CHANGELOG.md and the version
-#                   file committed to the default branch
+#                   file committed to the default branch (kind hotfix: no commit)
 #   render A B      print the CHANGELOG entry the range A..B gives today
 #   render-history  print (or --write) the retro section: every first-parent
 #                   commit, by month
@@ -34,8 +34,10 @@ usage() {
 	cat <<'EOF'
 
 Options (any subcommand):
-  --kind deploy|store|apply   what "released" means: on prod / live on the Chrome
-                              Web Store / applied (default: deploy)
+  --kind deploy|store|apply|hotfix
+                              what "released" means: on prod / live on the Chrome
+                              Web Store / applied / on prod as a patch of the
+                              release prod runs (default: deploy)
   --sha SHA                   the shipped commit (default: HEAD; store: the bump
                               commit of --version)
   --version X.Y.Z             an explicit version (1.0.0 by hand; store: the
@@ -66,6 +68,12 @@ Options (any subcommand):
                               migrations (alembic/versions); repeatable
   --staging STATE             post-merge: how the staging deploy ended: success
                               (default), failure or held
+  --base vX.Y.Z               hotfix: the release the hotfix patches; must be the
+                              one the shipped sha sits on (default: found there)
+  --reason TEXT               hotfix: why, usually the urgent thread's link (required)
+  --by TEXT                   hotfix: who triggered it, as the post reads it
+                              (default: the actor)
+  --suite TEXT                hotfix: the post's `suite:` line (default: none)
 
 Environment: SLACK_RELEASES_BOT_TOKEN, SLACK_RELEASES_CHANNEL (post-merge reads
 SLACK_MERGES_CHANNEL instead), SLACK_API_URL, RELEASE_PAUSED (post-merge: "true"
@@ -99,6 +107,12 @@ FORCE=0
 BEFORE=""
 MIGRATIONS=""
 STAGING=success
+BASE=""
+REASON=""
+BY=""
+SUITE=""
+HF_BASE=""
+HF_LOADED=""
 POS1=""
 POS2=""
 NPOS=0
@@ -116,7 +130,7 @@ parse_opts() {
 			;;
 		--kind | --sha | --version | --version-file | --name | --repo | --branch | --remote | \
 			--changelog | --run-url | --run-label | --through | --heading | --bump-file | --retro-note | \
-			--before | --migrations | --staging)
+			--before | --migrations | --staging | --base | --reason | --by | --suite)
 			[ $# -ge 2 ] || die "$1 needs a value"
 			case $1 in
 			--kind) KIND=$2 ;;
@@ -137,6 +151,10 @@ parse_opts() {
 			--before) BEFORE=$2 ;;
 			--migrations) MIGRATIONS="$MIGRATIONS $2" ;;
 			--staging) STAGING=$2 ;;
+			--base) BASE=v${2#v} ;;
+			--reason) REASON=$2 ;;
+			--by) BY=$2 ;;
+			--suite) SUITE=$2 ;;
 			esac
 			shift
 			;;
@@ -152,7 +170,7 @@ parse_opts() {
 		esac
 		shift
 	done
-	case $KIND in deploy | store | apply) ;; *) die "--kind must be deploy, store or apply" ;; esac
+	case $KIND in deploy | store | apply | hotfix) ;; *) die "--kind must be deploy, store, apply or hotfix" ;; esac
 	case $STAGING in success | failure | held) ;; *) die "--staging must be success, failure or held" ;; esac
 	if [ -n "$VERSION" ] && ! is_semver "$VERSION"; then die "--version $VERSION is not X.Y.Z"; fi
 	return 0
@@ -188,7 +206,7 @@ init_context() {
 		RUN_URL="$SERVER/${GITHUB_REPOSITORY:-$REPO}/actions/runs/$GITHUB_RUN_ID"
 	fi
 	if [ -z "$RUN_LABEL" ]; then
-		if [ "$KIND" = deploy ]; then RUN_LABEL="CD run"; else RUN_LABEL="run"; fi
+		case $KIND in deploy | hotfix) RUN_LABEL="CD run" ;; *) RUN_LABEL="run" ;; esac
 		[ -z "${GITHUB_RUN_NUMBER:-}" ] || RUN_LABEL="$RUN_LABEL #$GITHUB_RUN_NUMBER"
 	fi
 	NOW_ISO=${RELEASE_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
@@ -199,7 +217,7 @@ init_context() {
 	WORK=$(mktemp -d "${TMPDIR:-/tmp}/release-tools.XXXXXX")
 	trap cleanup EXIT
 	case $KIND in
-	deploy) VERB="is on prod" FACT="Deployed" ;;
+	deploy | hotfix) VERB="is on prod" FACT="Deployed" ;;
 	store) VERB="is live on the Chrome Web Store" FACT="Published" ;;
 	apply) VERB="is applied" FACT="Applied" ;;
 	esac
@@ -283,6 +301,85 @@ prev_tag() {
 		[ "$t" != "$1" ] || seen=1
 	done
 	return 0
+}
+
+# ---------------------------------------------------------------- hotfixes --
+# A hotfix tag is a release tag that is not an ancestor of the branch's head: the
+# hotfix is the base release plus cherry-picks (git cherry-pick -x, run in CI),
+# and nothing merges it back. Versions still run through every tag; "what the
+# branch released" runs through the tags that are on the branch.
+
+# the remote branch's head commit, or nothing (and 1) when it is not known here
+head_ref() {
+	[ -n "$BRANCH" ] || return 1
+	git rev-parse -q --verify "refs/remotes/$REMOTE/$BRANCH^{commit}" 2>/dev/null
+}
+
+is_hotfix_tag() {
+	local h
+	h=$(head_ref) || return 1
+	! git merge-base --is-ancestor "$(tag_commit "$1")" "$h"
+}
+
+# the newest release tag that is on the branch: what the branch released. The
+# newest of all when the branch is not known here.
+released_tag() {
+	local h t
+	if ! h=$(head_ref); then
+		release_tags | sed -n 1p
+		return 0
+	fi
+	for t in $(release_tags); do
+		if git merge-base --is-ancestor "$(tag_commit "$t")" "$h"; then
+			echo "$t"
+			return 0
+		fi
+	done
+	return 0
+}
+
+# hotfix_base COMMIT: the highest release tag below COMMIT, the release (or the
+# hotfix) it patches
+hotfix_base() {
+	local t c
+	for t in $(release_tags); do
+		c=$(tag_commit "$t")
+		[ "$c" != "$1" ] || continue
+		if git merge-base --is-ancestor "$c" "$1"; then
+			echo "$t"
+			return 0
+		fi
+	done
+	return 0
+}
+
+# $WORK/hf.map, once per run: "<picked sha> <hotfix tag>" for every commit a
+# hotfix tag cherry-picked, read from the "(cherry picked from commit …)" trailer
+# that -x writes
+hotfix_load() {
+	[ -z "$HF_LOADED" ] || return 0
+	HF_LOADED=1
+	: >"$WORK/hf.map"
+	local t c base picked
+	head_ref >/dev/null || return 0
+	for t in $(release_tags); do
+		is_hotfix_tag "$t" || continue
+		c=$(tag_commit "$t")
+		base=$(hotfix_base "$c")
+		[ -n "$base" ] || continue
+		git log --format=%B "$(tag_commit "$base")..$c" >"$WORK/hf.log"
+		grep -Eo 'cherry picked from commit [0-9a-f]{40}' "$WORK/hf.log" >"$WORK/hf.picked" || true
+		while read -r _ _ _ _ picked <&3; do
+			printf '%s %s\n' "$picked" "$t" >>"$WORK/hf.map"
+		done 3<"$WORK/hf.picked"
+	done
+	return 0
+}
+
+# the hotfix tag that already carries commit $1, or nothing (after hotfix_load, in
+# this shell: a $(...) would load it again for every commit)
+hotfix_of() {
+	awk -v s="$1" '$1 == s { print $2; exit }' "$WORK/hf.map"
 }
 
 history_marker() {
@@ -421,10 +518,11 @@ pr_release_note() {
 
 # ---------------------------------------------------------------- collect --
 
-# classify start..end into $WORK/c.{breaking,feat,fix,other} ("pr<TAB>visual<TAB>title", pr "-" when none)
+# classify start..end into $WORK/c.{breaking,feat,fix,other} ("pr<TAB>visual<TAB>hotfix<TAB>title", pr and
+# hotfix "-" when none; hotfix is the tag that already put the change on prod)
 # and $WORK/notes; sets N_TOTAL N_BREAKING N_FEAT N_FIX N_OTHER VISUAL_PRS
 collect() {
-	local start=$1 end=$2 sha title cat note
+	local start=$1 end=$2 sha title cat note hf
 	: >"$WORK/c.breaking"
 	: >"$WORK/c.feat"
 	: >"$WORK/c.fix"
@@ -433,6 +531,7 @@ collect() {
 	VISUAL_PRS=""
 	N_TOTAL=0 N_BREAKING=0 N_FEAT=0 N_FIX=0 N_OTHER=0
 	range_lines "$start" "$end" >"$WORK/range"
+	hotfix_load
 	while IFS="$(printf '\t')" read -r sha title <&3; do
 		[ -n "$sha" ] || continue
 		parse_title "$title"
@@ -447,8 +546,9 @@ collect() {
 			N_OTHER=$((N_OTHER + 1))
 		fi
 		N_TOTAL=$((N_TOTAL + 1))
+		hf=$(hotfix_of "$sha")
 		# "-" for no PR: a leading empty field would vanish into IFS whitespace
-		printf '%s\t%s\t%s\n' "${P_PR:--}" "$P_VISUAL" "$P_DISPLAY" >>"$WORK/c.$cat"
+		printf '%s\t%s\t%s\t%s\n' "${P_PR:--}" "$P_VISUAL" "${hf:--}" "$P_DISPLAY" >>"$WORK/c.$cat"
 		if [ -n "$P_PR" ]; then
 			pr_fetch "$P_PR"
 			if pr_has_label "$P_PR" release:visual; then VISUAL_PRS="$VISUAL_PRS #$P_PR"; fi
@@ -463,18 +563,23 @@ collect() {
 
 # ------------------------------------------------------------- rendering --
 
-md_line() { # pr ("-" or empty: none) visual title
+# in_prod_note hotfix-tag: the marking of a change a hotfix already put on prod
+in_prod_note() {
+	case ${1:--} in - | "") ;; *) printf ' (already in prod as %s)' "$1" ;; esac
+}
+
+md_line() { # pr ("-" or empty: none) visual title [hotfix tag ("-": none)]
 	local s="- $3"
 	[ -z "$1" ] || [ "$1" = - ] || s="$s ([#$1]($REPO_URL/pull/$1))"
 	[ "$2" != 1 ] || s="$s ⚠ visual review missing"
-	printf '%s\n' "$s"
+	printf '%s%s\n' "$s" "$(in_prod_note "${4:--}")"
 }
 
 md_section() { # heading file
 	[ -s "$2" ] || return 0
 	printf '### %s\n' "$1"
-	local pr vis title
-	while IFS="$(printf '\t')" read -r pr vis title; do md_line "$pr" "$vis" "$title"; done <"$2"
+	local pr vis hf title
+	while IFS="$(printf '\t')" read -r pr vis hf title; do md_line "$pr" "$vis" "$title" "$hf"; done <"$2"
 	printf '\n'
 }
 
@@ -531,7 +636,9 @@ render_tag_entry() {
 		permalink=$(marker_value "$body" slack_permalink)
 		! grep -q '^<!-- release-tools retro -->' "$body" || retro=1
 	fi
-	render_entry "${tag#v}" "$(tag_date "$tag")" "$(facts_line "$FACT" "$end" "$run_url" "${run_label:-run}" "$permalink" "$retro")"
+	local verb=$FACT
+	if is_hotfix_tag "$tag"; then verb="Hotfix on $(hotfix_base "$end"), deployed"; fi
+	render_entry "${tag#v}" "$(tag_date "$tag")" "$(facts_line "$verb" "$end" "$run_url" "${run_label:-run}" "$permalink" "$retro")"
 }
 
 # ----------------------------------------------------- the release note --
@@ -704,7 +811,7 @@ next_release_text() {
 
 mrkdwn_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
-slack_bullet() { # pr ("-": none) visual title
+slack_bullet() { # pr ("-": none) visual title [hotfix tag ("-": none)]
 	local pr=${1#-} t=$3 s re_tail='^(.*) \(([^()]+)\)$'
 	if [ -n "$pr" ] && [[ $t =~ $re_tail ]]; then
 		s="$(mrkdwn_escape "${BASH_REMATCH[1]}") ($(mrkdwn_escape "${BASH_REMATCH[2]}"), #$pr)"
@@ -714,7 +821,7 @@ slack_bullet() { # pr ("-": none) visual title
 		s=$(mrkdwn_escape "$t")
 	fi
 	[ "$2" != 1 ] || s="$s ⚠ visual review missing"
-	printf '• %s\n' "$s"
+	printf '• %s%s\n' "$s" "$(in_prod_note "${4:--}")"
 }
 
 plural() { # n singular plural
@@ -733,16 +840,20 @@ counts_phrase() {
 
 # slack_release_text tag sha  (after collect)
 slack_release_text() {
-	local tag=$1 links shown=0 pr vis title cat
+	local tag=$1 links shown=0 pr vis hf title cat
+	if [ "$KIND" = hotfix ]; then
+		slack_hotfix_text "$tag" "$2"
+		return 0
+	fi
 	links="<$REPO_URL/releases/tag/$tag|Release>"
 	[ -z "$RUN_URL" ] || links="$links · <$RUN_URL|$RUN_LABEL>"
 	links="$links · \`$(git rev-parse --short=7 "$2")\`"
 	printf '🚀 *%s %s* %s — %s  (%s)\n' "$(mrkdwn_escape "$NAME")" "$tag" "$VERB" "$(counts_phrase)" "$links"
 	for cat in breaking feat fix other; do
-		while IFS="$(printf '\t')" read -r pr vis title; do
+		while IFS="$(printf '\t')" read -r pr vis hf title; do
 			shown=$((shown + 1))
 			[ "$shown" -le 8 ] || continue
-			slack_bullet "$pr" "$vis" "$title"
+			slack_bullet "$pr" "$vis" "$title" "$hf"
 		done <"$WORK/c.$cat"
 	done
 	[ "$shown" -le 8 ] || printf '+ %s more in the Release\n' "$((shown - 8))"
@@ -756,6 +867,54 @@ slack_redeploy_text() { # label sha detail
 	s="♻️ *$(mrkdwn_escape "$NAME") $1* re-deployed to prod ($3) by $(mrkdwn_escape "$ACTOR")"
 	[ -z "$RUN_URL" ] || s="$s  (<$RUN_URL|$RUN_LABEL>)"
 	printf '%s\n' "$s"
+}
+
+# hotfix_note pr: sets HF_PLAIN HF_ASKED from the PR's release note: its first line
+# without the audience prefix (users:, internal:, tests:), and an `asked-by:` line
+hotfix_note() {
+	local note
+	HF_PLAIN="" HF_ASKED=""
+	[ -n "$1" ] || return 0
+	pr_fetch "$1"
+	note=$(pr_release_note "$1")
+	HF_ASKED=$(printf '%s\n' "$note" | sed -nE 's/^[[:space:]]*asked-by:[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' | sed -n 1p)
+	HF_PLAIN=$(printf '%s\n' "$note" | grep -Ev '^[[:space:]]*asked-by:' | sed -n 1p |
+		sed -E 's/^[[:space:]]*(users|internal|tests):[[:space:]]*//; s/[[:space:]]+$//')
+	return 0
+}
+
+# slack_hotfix_text tag sha  (after collect): the post that tells a hotfix is on prod
+slack_hotfix_text() {
+	local tag=$1 sha=$2 links total=0 s refs task commit subject
+	[ -n "$HF_BASE" ] || HF_BASE=$(hotfix_base "$(git rev-parse "$sha")")
+	links="<$REPO_URL/releases/tag/$tag|Release>"
+	[ -z "$RUN_URL" ] || links="$links · <$RUN_URL|$RUN_LABEL>"
+	links="$links · \`$(git rev-parse --short=7 "$sha")\`"
+	printf '🩹 *%s %s* — hotfix on %s (%s)\n' "$(mrkdwn_escape "$NAME")" "$tag" "${HF_BASE:-?}" "$links"
+	while IFS="$(printf '\t')" read -r commit subject <&4; do
+		[ -n "$commit" ] || continue
+		total=$((total + 1))
+		[ "$total" -le 8 ] || continue
+		parse_title "$subject"
+		hotfix_note "$P_PR"
+		if [ -z "$HF_PLAIN" ]; then
+			slack_bullet "${P_PR:--}" "$P_VISUAL" "$P_DISPLAY" | tr -d '\n'
+		else
+			task=$(printf '%s\n' "$P_DISPLAY" | grep -Eo 'T-[0-9]+' | sed -n 1p || true)
+			[ -n "$task" ] || task=$(git log -1 --format=%b "$commit" | grep -Eo 'T-[0-9]+' | sed -n 1p || true)
+			refs=""
+			[ -z "$P_PR" ] || refs="#$P_PR"
+			[ -z "$task" ] || refs="${refs:+$refs, }$task"
+			printf '• %s%s' "$(mrkdwn_escape "$HF_PLAIN")" "${refs:+ ($refs)}"
+		fi
+		[ -z "$HF_ASKED" ] || printf ' · asked by %s' "$(mrkdwn_escape "$HF_ASKED")"
+		printf '\n'
+	done 4<"$WORK/range"
+	[ "$total" -le 8 ] || printf '+ %s more in the Release\n' "$((total - 8))"
+	s=$(printf '%s' "$REASON" | tr '\n' ' ')
+	printf 'reason: %s · by %s\n' "$(mrkdwn_escape "$s")" "$(mrkdwn_escape "${BY:-$ACTOR}")"
+	[ -z "$SUITE" ] || printf 'suite: %s\n' "$(mrkdwn_escape "$SUITE")"
+	return 0
 }
 
 # merge_render SHA PR VISUAL MIGS FORM: sets MERGE_TEXT, the message of one merge, after
@@ -925,6 +1084,11 @@ release_body_new() {
 	s="$FACT \`$(git rev-parse "$2")\`"
 	[ -z "$RUN_URL" ] || s="$s · [$RUN_LABEL]($RUN_URL)"
 	printf '%s · %s\n' "$s" "$NOW_ISO"
+	if [ "$KIND" = hotfix ]; then
+		[ -n "$HF_BASE" ] || HF_BASE=$(hotfix_base "$(git rev-parse "$2")")
+		printf 'Hotfix on %s · reason: %s\n' "${HF_BASE:-?}" "$(printf '%s' "$REASON" | tr '\n' ' ')"
+		[ -z "$SUITE" ] || printf 'Suite: %s\n' "$SUITE"
+	fi
 	printf 'Slack: pending\n'
 	if [ -n "$VISUAL_PRS" ]; then
 		printf 'Screenshots: pending (release:visual on %s)\n' "$(echo "$VISUAL_PRS" | sed 's/^ //; s/ /, /g')"
@@ -951,10 +1115,14 @@ push_tag() { # tag sha message [date]
 }
 
 create_release() { # tag sha notes-file [extra gh flags]
-	local tag=$1 sha=$2 notes=$3
+	local tag=$1 sha=$2 notes=$3 title=$1
 	shift 3
+	if [ "$KIND" = hotfix ]; then
+		[ -n "$HF_BASE" ] || HF_BASE=$(hotfix_base "$(git rev-parse "$sha")")
+		title="$tag (hotfix on ${HF_BASE:-?})"
+	fi
 	gh release create "$tag" --repo "$REPO" --verify-tag --target "$(git rev-parse "$sha")" \
-		--title "$tag" --notes-file "$notes" "$@" >/dev/null </dev/null || die "gh release create $tag failed"
+		--title "$title" --notes-file "$notes" "$@" >/dev/null </dev/null || die "gh release create $tag failed"
 	log "GitHub Release $tag created"
 }
 
@@ -1161,7 +1329,7 @@ cmd_cut() {
 	init_context
 	resolve_branch
 	fetch_remote
-	local newest existing tag start version level ok=0
+	local newest existing tag start version level released ok=0
 	if [ "$KIND" = store ]; then
 		[ -n "$VERSION" ] || die "--kind store needs --version (the manifest's)"
 		if [ -z "$SHA" ]; then
@@ -1182,6 +1350,11 @@ cmd_cut() {
 		cut_existing "$existing" "$newest"
 		return
 	fi
+	if [ "$KIND" = hotfix ]; then
+		cut_hotfix "$newest"
+		return
+	fi
+	released=$(released_tag)
 	if [ -n "$newest" ]; then
 		if git merge-base --is-ancestor "$SHA" "$newest"; then
 			write_output action redeploy
@@ -1196,8 +1369,10 @@ cmd_cut() {
 			fi
 			return 0
 		fi
-		git merge-base --is-ancestor "$newest" "$SHA" ||
-			die "$(git rev-parse --short=7 "$SHA") does not descend from $newest; not releasing"
+		# a hotfix tag is the newest by version but is not on the branch: the release
+		# descends from what the branch released
+		git merge-base --is-ancestor "${released:-$newest}" "$SHA" ||
+			die "$(git rev-parse --short=7 "$SHA") does not descend from ${released:-$newest}; not releasing"
 	fi
 	start=$(range_start "$SHA" "$newest")
 	collect "$start" "$SHA"
@@ -1260,6 +1435,67 @@ cmd_cut() {
 	return "$ok"
 }
 
+# the hotfix: $SHA is the base release plus the cherry-picks, on a branch of its own
+# (hotfix/vX.Y.Z), never on the default branch. A tag, a Release, one post; the
+# CHANGELOG and the version file are not committed (the next release's cut lists it).
+cut_hotfix() {
+	local newest=$1 base head version tag prs="" sha subject msg
+	[ -n "$REASON" ] || die "--kind hotfix needs --reason (the urgent thread's link)"
+	head=$(head_ref) || die "cannot read $REMOTE/$BRANCH here: a hotfix is told from a release by it"
+	if git merge-base --is-ancestor "$SHA" "$head"; then
+		die "$(git rev-parse --short=7 "$SHA") is on $BRANCH: that is a release, not a hotfix (--kind deploy)"
+	fi
+	base=$(hotfix_base "$SHA")
+	[ -n "$base" ] || die "no release tag below $(git rev-parse --short=7 "$SHA"): a hotfix patches a release"
+	if [ -n "$BASE" ] && [ "$BASE" != "$base" ]; then
+		die "$(git rev-parse --short=7 "$SHA") sits on $base, not on $BASE"
+	fi
+	if [ "$base" != "$newest" ]; then
+		die "$newest was cut after the base $base: not cutting a hotfix on a stale base"
+	fi
+	HF_BASE=$base
+	collect "$base" "$SHA"
+	[ "$N_TOTAL" != 0 ] || die "no commit between $base and $(git rev-parse --short=7 "$SHA"): nothing to patch"
+	if [ -n "$VERSION" ]; then
+		version=$VERSION
+		semver_gt "$version" "${newest#v}" || die "--version $version is not above $newest"
+	else
+		version=$(bump_version "${newest#v}" patch)
+	fi
+	tag="v$version"
+	tag_exists "$tag" && die "$tag exists on another commit"
+	while IFS="$(printf '\t')" read -r sha subject <&3; do
+		parse_title "$subject"
+		[ -z "$P_PR" ] || prs="$prs, #$P_PR"
+	done 3<"$WORK/range"
+	msg="hotfix on $base${prs:+: ${prs#, }}"
+	write_output version "$version"
+	write_output tag "$tag"
+	write_output release_url "$REPO_URL/releases/tag/$tag"
+
+	if [ "$DRY_RUN" = 1 ]; then
+		printf '== plan ==\n'
+		printf 'tag %s (annotated, "%s") on %s, pushed to %s\n' "$tag" "$msg" "$(git rev-parse --short=7 "$SHA")" "$REMOTE"
+		printf 'GitHub Release %s (hotfix on %s) on %s\n' "$tag" "$base" "$REPO"
+		printf 'Slack post to %s\n' "${SLACK_RELEASES_CHANNEL:-(SLACK_RELEASES_CHANNEL unset)}"
+		printf 'no CHANGELOG commit: the next release lists %s\n' "$tag"
+		printf '== Slack ==\n'
+		slack_hotfix_text "$tag" "$SHA"
+		write_output action dry-run
+		write_output released false
+		return 0
+	fi
+
+	push_tag "$tag" "$SHA" "$msg"
+	release_body_new "$tag" "$SHA" >"$WORK/notes.md"
+	create_release "$tag" "$SHA" "$WORK/notes.md"
+	summary "### $NAME $tag (hotfix on $base)" "" "$(cat "$WORK/notes.md")"
+	announce "$tag" "$SHA"
+	write_output action release
+	write_output released true
+	return 0
+}
+
 # the sha already carries a release tag: finish what a crash left undone, else
 # it is a re-deploy
 cut_existing() {
@@ -1284,7 +1520,7 @@ cut_existing() {
 	fi
 	if [ "$posted" = 1 ]; then
 		write_output action recovered
-	elif [ "$KIND" = deploy ]; then
+	elif [ "$KIND" = deploy ] || [ "$KIND" = hotfix ]; then
 		write_output action redeploy
 		if [ "$tag" = "$newest" ]; then
 			redeploy_post "$tag" "$SHA" "sha \`$(git rev-parse --short=7 "$SHA")\`"
@@ -1295,7 +1531,8 @@ cut_existing() {
 		write_output action noop
 		log "$tag is already released"
 	fi
-	[ "$DRY_RUN" = 1 ] || changelog_commit
+	# a hotfix commits nothing to the branch: the next release's CHANGELOG lists it
+	[ "$DRY_RUN" = 1 ] || [ "$KIND" = hotfix ] || changelog_commit
 }
 
 cmd_render() {

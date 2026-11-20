@@ -171,6 +171,53 @@ by dispatch), the job posts `♻️ v0.41.0 re-deployed to prod (rollback from v
 nothing. A rollback done outside CD (traffic moved by hand) posts nothing, so post the `♻️` line in
 the channel yourself.
 
+### A hotfix on prod (kind `hotfix`)
+
+A hotfix is the release prod runs plus a few cherry-picked fixes, built on a branch of its own
+(`hotfix/vX.Y.Z`) by the repository's hotfix workflow: the pick, the tests and the deploy are the
+workflow's, and so is `git cherry-pick -x`. This kind runs **after** the deploy, with `sha` the hotfix
+branch's head:
+
+```yaml
+      - uses: dxbroker-algo/release-tools/cut@<sha>
+        with:
+          kind: hotfix
+          sha: ${{ needs.pick.outputs.sha }}
+          reason: ${{ inputs.reason }}          # required: the urgent thread's link
+          by: the PM under S-34's standing yes  # optional; default: the actor
+          suite: affected areas green, 5 min; full suite running after the deploy   # optional
+          slack_token: ${{ secrets.SLACK_RELEASES_BOT_TOKEN }}
+          slack_channel: ${{ vars.SLACK_RELEASES_CHANNEL }}
+```
+
+- **The version** is the highest tag's patch + 1 (`v1.61.0` → `v1.61.1`; a hotfix on a hotfix
+  `v1.61.1` → `v1.61.2`). `--version` can name another one above it.
+- **The base** is the highest release tag below `sha`. The cut is **refused** when `base` is given and
+  differs, when a newer tag exists (a release was cut since the base), when `sha` is on the default
+  branch (that is a release: use kind `deploy`), or when nothing lies between the base and `sha`.
+- **What it makes:** an annotated tag `vX.Y.Z` on `sha` (`hotfix on v1.61.0: #931, #932`), a Release titled
+  `vX.Y.Z (hotfix on v1.61.0)`, and one post:
+
+  ```
+  🩹 *dxb-backend v1.61.1* — hotfix on v1.61.0 (<Release> · <run> · `3f2a9c1`)
+  • Brokers can sign in again after a password reset (#931, T-1710) · asked by Max
+  reason: <the urgent thread> · by the PM under S-34's standing yes
+  suite: affected areas green, 5 min; full suite running after the deploy
+  ```
+
+  Each bullet is the PR's `## Release note` line, without its `users:` / `internal:` / `tests:` prefix,
+  and `asked by` comes from an `asked-by:` line in the note. A PR with no note reads as its title.
+- **No CHANGELOG commit, no version-file bump:** nothing is pushed to the default branch. The next
+  release's cut writes the hotfix as its own section (`## [1.61.1]`, `Hotfix on v1.61.0, deployed …`).
+- A hotfix tag is **a release tag that is not an ancestor of the default branch's head**. The next
+  release (kind `deploy`) therefore:
+  - bumps from the highest tag, the hotfix's included, and starts its range at it, so the range holds
+    every merge since the base, **the fix's own merge included**;
+  - checks that it descends from the newest tag **on the branch**, not from the hotfix;
+  - marks each merge a hotfix already carries `(already in prod as v1.61.1)`, in the Release, the post
+    and the CHANGELOG. It finds them in the `(cherry picked from commit …)` lines that `-x` leaves.
+- `release.sh post vX.Y.Z --kind hotfix --reason …` posts the hotfix text again for an existing Release.
+
 ### A browser extension published to the Chrome Web Store (kind `store`)
 
 The version is the manifest's, bumped in the PR. It is released when the store shows it
@@ -437,8 +484,9 @@ today, someone edited a PR body or label after the cut: that is worth reporting,
 ## Subcommands
 
 ```
-release.sh cut             [--kind deploy|store|apply] [--sha SHA] [--version X.Y.Z]
+release.sh cut             [--kind deploy|store|apply|hotfix] [--sha SHA] [--version X.Y.Z]
                            [--version-file PATH]... [--name NAME] [--dry-run]
+                           [--base vX.Y.Z --reason TEXT [--by TEXT] [--suite TEXT]]   (kind hotfix)
 release.sh render          FROM TO          (FROM '' : from the retro marker or the root)
 release.sh render-history  [--through REF] [--heading TEXT] [--write]
 release.sh post            vX.Y.Z [--kind …] [--force] [--dry-run]
