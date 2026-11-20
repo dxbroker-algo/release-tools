@@ -258,7 +258,7 @@ frontend <PR link|#786> · T-1698 · asked by Leon · staging ✅ <run|deployed>
 | the task | the first `T-NNN` of the title, else of the squash body |
 | asked by | the note's `asked-by:` line, left out without one |
 | staging | the run's link, and `deployed`, `not updated` or `held` |
-| prod | `next release <day> <time>Z`, computed from the first `cron: 'M H * * *'` in `.github/workflows/release.yml` **at the merged commit**; `next release` with no time when that file has no daily cron; `releases paused` when the `release_paused` input is `true` |
+| prod | `next release <day> <time>Z`, computed from the `release_cron` input when set, else the first `cron: 'M H * * *'` in `.github/workflows/release.yml` **at the merged commit**; `next release` with no time when neither gives a daily cron; `releases paused` when the `release_paused` input is `true` |
 | `migration <id>` | the files the merge **added** under `migrations` (`alembic/versions`): the file's `revision = "…"`, else its name without the extension. An edited migration is not named. A **shallow checkout** has no parent to compare with, so it names none and warns: check out with `fetch-depth: 2` |
 | `🖼 screenshots in thread` | the PR carries `release:visual`; the screenshots go in this post's thread |
 
@@ -326,7 +326,9 @@ many went out. It never fails the staging deploy.
           fetch-depth: 12            # the push's merges, and the ten before it
       - uses: dxbroker-algo/release-tools/post-merge@<sha>
         with:
-          staging: ${{ needs.deploy.result }}   # success; any other result is "not updated"
+          staging: ${{ needs.deploy.result }}   # success, or failure
+          deployed: ${{ needs.deploy.outputs.deployed }}   # a green job that deployed nothing is held (🟨)
+          release_cron: ''                      # a repo whose release.yml has no schedule: '47 3 * * *'
           release_paused: ${{ vars.RELEASE_PAUSED }}
           migrations: alembic/versions         # backend only
           slack_token: ${{ secrets.SLACK_RELEASES_BOT_TOKEN }}
@@ -334,7 +336,10 @@ many went out. It never fails the staging deploy.
 ```
 
 With a `before` that is more than a few commits back, check out `fetch-depth: 0` (a train's commits must be
-present to be read). A held deploy passes `staging: held`.
+present to be read). A green deploy job that deployed nothing (the migration skew) is **held**: pass its `deployed` output, and
+`success` with `deployed` other than `true` reads as 🟨; any result other than `success` reads as 🟥.
+A repository whose `release.yml` has no schedule (the release is chained from another's) passes
+`release_cron` (`M H * * *`) so its posts still say when prod gets the change; empty reads the file.
 
 ### The PR-title check (every repository)
 
@@ -447,6 +452,7 @@ release.sh --help
 Environment: `SLACK_RELEASES_BOT_TOKEN`, `SLACK_RELEASES_CHANNEL` (`post-merge` reads
 `SLACK_MERGES_CHANNEL` instead), `GH_TOKEN` (for `gh`),
 `RELEASE_PAUSED` (`post-merge`: `true` says "releases paused" in place of the next release time),
+`RELEASE_CRON` (`post-merge`: the daily cron, when `release.yml` at the commit has none),
 `SLACK_API_URL` (tests), `RELEASE_NOW` (tests), `RELEASE_GIT_NAME` / `RELEASE_GIT_EMAIL` (the release
 commit's author, `github-actions[bot]` by default).
 

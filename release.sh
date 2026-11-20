@@ -69,7 +69,8 @@ Options (any subcommand):
 
 Environment: SLACK_RELEASES_BOT_TOKEN, SLACK_RELEASES_CHANNEL (post-merge reads
 SLACK_MERGES_CHANNEL instead), SLACK_API_URL, RELEASE_PAUSED (post-merge: "true"
-says "releases paused" in place of the next release time),
+says "releases paused" in place of the next release time), RELEASE_CRON (post-merge: the
+release's daily cron, "M H * * *", when release.yml at the commit has none),
 GH_TOKEN, RELEASE_NOW (an ISO time, for tests), RELEASE_GIT_NAME/EMAIL.
 EOF
 }
@@ -671,16 +672,20 @@ fmt_epoch() { # epoch format
 }
 
 # next_release_text SHA: the prod field of a merge post. The next scheduled release is
-# read from the cron in .github/workflows/release.yml at SHA (a daily "M H * * *"); a
-# repository with no such cron says "next release" without a time.
+# read from RELEASE_CRON when set (a repository whose release is chained from another's
+# schedule says that schedule), else from the cron in .github/workflows/release.yml at SHA
+# (a daily "M H * * *"); with neither it says "next release" without a time.
 next_release_text() {
 	local cron m="" h="" dom="" mon="" dow="" now today0 cand
 	if [ "${RELEASE_PAUSED:-}" = true ]; then
 		printf 'prod ⏸ releases paused'
 		return 0
 	fi
-	cron=$(git show "$1:.github/workflows/release.yml" 2>/dev/null |
-		sed -nE "s/^[[:space:]-]*cron:[[:space:]]*['\"]?([^'\"#]*).*/\1/p" | sed -n 1p || true)
+	cron=${RELEASE_CRON:-}
+	if [ -z "$cron" ]; then
+		cron=$(git show "$1:.github/workflows/release.yml" 2>/dev/null |
+			sed -nE "s/^[[:space:]-]*cron:[[:space:]]*['\"]?([^'\"#]*).*/\1/p" | sed -n 1p || true)
+	fi
 	read -r m h dom mon dow _ <<<"$cron" || true
 	if [[ $m =~ ^[0-9]+$ && $h =~ ^[0-9]+$ && "$dom$mon$dow" == '***' ]] && [ "$m" -lt 60 ] && [ "$h" -lt 24 ]; then
 		now=$(epoch_of "$NOW_ISO") || now=""

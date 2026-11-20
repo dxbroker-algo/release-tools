@@ -73,6 +73,23 @@ CALL_LOG_NOTE="users: Brokers see a Call log tab in Contacts, with missed calls 
 	[[ "$(slack_line 2 2)" == *"prod ⏳ next release" ]] || false
 }
 
+@test "RELEASE_CRON stands in for a release.yml with no schedule, and the file's cron is not consulted then" {
+	cron_workflow "'5 14 * * *'"
+	git commit -q -m "fix: one (#1)"
+	git push -q origin HEAD:refs/heads/master
+	RELEASE_CRON="47 3 * * *" run "$RELEASE" post-merge
+	[[ "$(slack_line 1 2)" == *"prod ⏳ next release Sat 21 Nov 03:47Z" ]] || false
+
+	land "fix: two (#2)"
+	git rm -q -r .github
+	git commit -q -m "chore: no workflow (#3)"
+	git push -q origin HEAD:refs/heads/master
+	RELEASE_CRON="47 3 * * *" run "$RELEASE" post-merge
+	[[ "$(slack_line 2 2)" == *"prod ⏳ next release Sat 21 Nov 03:47Z" ]] || false
+	RELEASE_CRON="not a cron" run "$RELEASE" post-merge --dry-run
+	[[ $output == *"prod ⏳ next release"* && $output != *"Z"$'\n'* ]] || false
+}
+
 @test "RELEASE_PAUSED=true says releases are paused" {
 	cron_workflow "'47 3 * * *'"
 	git commit -q -m "fix: one (#1)"

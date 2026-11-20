@@ -25,8 +25,14 @@ inputs:
     description: "The merge channel's id (SLACK_MERGES_CHANNEL)."
     default: ""
   staging:
-    description: "How the staging deploy ended: success, held (the migration skew), or failure (any other result: failure, skipped). Pass needs.<deploy>.result. A merge posted red or held is edited to green by a later green run."
+    description: "The staging deploy's job result (needs.<deploy>.result). success reads as 🟢 unless `deployed` says the deploy did not deploy; held is accepted as it is; any other result (failure, skipped) reads as 🟥. A merge posted red or held is edited to green by a later green run."
     default: "success"
+  deployed:
+    description: "The deploy job's `deployed` output, when it has one: 'true' means staging was updated; anything else non-empty with a success result is a held deploy (the migration skew: the job succeeded and deployed nothing). Empty: no information, success stays success."
+    default: ""
+  release_cron:
+    description: "The release's daily cron, `M H * * *`, for a repository whose release.yml has no schedule (it is chained from another's). Empty: read release.yml at the merged commit."
+    default: ""
   release_paused:
     description: "vars.RELEASE_PAUSED: when 'true', the post says releases are paused in place of the next release time."
     default: ""
@@ -53,6 +59,8 @@ runs:
         IN_BEFORE: ${{ inputs.before }}
         IN_MIGRATIONS: ${{ inputs.migrations }}
         IN_STAGING: ${{ inputs.staging }}
+        IN_DEPLOYED: ${{ inputs.deployed }}
+        RELEASE_CRON: ${{ inputs.release_cron }}
         IN_DRY_RUN: ${{ inputs.dry_run }}
         RELEASE_PAUSED: ${{ inputs.release_paused }}
         GH_TOKEN: ${{ inputs.github_token }}
@@ -62,8 +70,13 @@ runs:
         set -euo pipefail
         script="$GITHUB_ACTION_PATH/../release.sh"
         staging=${IN_STAGING:-success}
-        # a job result other than success is staging not updated: failure, skipped, cancelled
-        case $staging in success | failure | held) ;; *) staging=failure ;; esac
+        # a green job that did not deploy is a held deploy (T-1531's migration skew);
+        # any other result is staging not updated: failure, skipped, cancelled
+        case $staging in
+        success) if [ -n "$IN_DEPLOYED" ] && [ "$IN_DEPLOYED" != true ]; then staging=held; fi ;;
+        held) ;;
+        *) staging=failure ;;
+        esac
         args=(--sha "$IN_SHA" --staging "$staging")
         [ -z "$IN_BEFORE" ] || args+=(--before "$IN_BEFORE")
         [ "$IN_DRY_RUN" != true ] || args+=(--dry-run)

@@ -1,0 +1,133 @@
+2026-11-20T20:05:37Z  cd /Users/stanislavkofanov/development/dxb-ai/.worktrees/T-1703-release-tools; grep -c '^ok' .bavarde-tmp/full.out; grep '^not ok' .bavarde-tmp/full.out; rm -f .bavarde-tmp/full.out .bavarde-tmp/full.time; git push -q -u origin bavarde/T-1703 2>&1 | tail -2; gh pr create --base master --title "feat: merge post v2 and the pr-note check (T-1703)" --body-file /private/tmp/claude-501/-Users-stanislavkofanov-development-dxb-ai--worktrees-T-1703-release-tools/b04af605-9a27-4906-8b4e-f91db84aad42/scratchpad/pr-body.md 2>&1 | tail -2
+2026-11-20T20:11:57Z  cd /Users/stanislavkofanov/development/dxb-ai/.worktrees/T-1703-release-tools; python3 - <<'EOF'
+p='release.sh'
+s=open(p).read()
+s=s.replace("""	cron=$(git show "$1:.github/workflows/release.yml" 2>/dev/null |
+		sed -nE "s/^[[:space:]-]*cron:[[:space:]]*['\\"]?([^'\\"#]*).*/\\1/p" | sed -n 1p || true)
+""","""	cron=${RELEASE_CRON:-}
+	if [ -z "$cron" ]; then
+		cron=$(git show "$1:.github/workflows/release.yml" 2>/dev/null |
+			sed -nE "s/^[[:space:]-]*cron:[[:space:]]*['\\"]?([^'\\"#]*).*/\\1/p" | sed -n 1p || true)
+	fi
+""")
+s=s.replace("""# read from the cron in .github/workflows/release.yml at SHA (a daily "M H * * *"); a
+# repository with no such cron says "next release" without a time.""","""# read from RELEASE_CRON when set (a repository whose release is chained from another's
+# schedule says that schedule), else from the cron in .github/workflows/release.yml at SHA
+# (a daily "M H * * *"); with neither it says "next release" without a time.""")
+s=s.replace("""RELEASE_PAUSED (post-merge: "true"
+says "releases paused" in place of the next release time),""","""RELEASE_PAUSED (post-merge: "true"
+says "releases paused" in place of the next release time), RELEASE_CRON (post-merge: the
+release's daily cron, "M H * * *", when release.yml at the commit has none),""")
+open(p,'w').write(s)
+
+p='post-merge/action.yml'
+s=open(p).read()
+s=s.replace('''    description: "How the staging deploy ended: success, held (the migration skew), or failure (any other result: failure, skipped). Pass needs.<deploy>.result. A merge posted red or held is edited to green by a later green run."
+    default: "success"''','''    description: "The staging deploy's job result (needs.<deploy>.result). success reads as 🟢 unless `deployed` says the deploy did not deploy; held is accepted as it is; any other result (failure, skipped) reads as 🟥. A merge posted red or held is edited to green by a later green run."
+    default: "success"
+  deployed:
+    description: "The deploy job's `deployed` output, when it has one: 'true' means staging was updated; anything else non-empty with a success result is a held deploy (the migration skew: the job succeeded and deployed nothing). Empty: no information, success stays success."
+    default: ""
+  release_cron:
+    description: "The release's daily cron, `M H * * *`, for a repository whose release.yml has no schedule (it is chained from another's). Empty: read release.yml at the merged commit."
+    default: ""''')
+s=s.replace("""        IN_STAGING: ${{ inputs.staging }}
+""","""        IN_STAGING: ${{ inputs.staging }}
+        IN_DEPLOYED: ${{ inputs.deployed }}
+        RELEASE_CRON: ${{ inputs.release_cron }}
+""")
+s=s.replace("""        # a job result other than success is staging not updated: failure, skipped, cancelled
+        case $staging in success | failure | held) ;; *) staging=failure ;; esac""","""        # a green job that did not deploy is a held deploy (T-1531's migration skew);
+        # any other result is staging not updated: failure, skipped, cancelled
+        case $staging in
+        success) if [ -n "$IN_DEPLOYED" ] && [ "$IN_DEPLOYED" != true ]; then staging=held; fi ;;
+        held) ;;
+        *) staging=failure ;;
+        esac""")
+open(p,'w').write(s)
+
+p='README.md'
+s=open(p).read()
+s=s.replace("""          staging: ${{ needs.deploy.result }}   # success; any other result is "not updated\"""","""          staging: ${{ needs.deploy.result }}   # success, or failure
+          deployed: ${{ needs.deploy.outputs.deployed }}   # a green job that deployed nothing is held (🟨)
+          release_cron: ''                      # a repo whose release.yml has no schedule: '47 3 * * *'""")
+s=s.replace("""A held deploy passes `staging: held`.""","""A green deploy job that deployed nothing (the migration skew) is **held**: pass its `deployed` output, and
+`success` with `deployed` other than `true` reads as 🟨; any result other than `success` reads as 🟥.
+A repository whose `release.yml` has no schedule (the release is chained from another's) passes
+`release_cron` (`M H * * *`) so its posts still say when prod gets the change; empty reads the file.""")
+s=s.replace("""computed from the first `cron: 'M H * * *'` in `.github/workflows/release.yml` **at the merged commit**; `next release` with no time when that file has no daily cron;""","""computed from the `release_cron` input when set, else the first `cron: 'M H * * *'` in `.github/workflows/release.yml` **at the merged commit**; `next release` with no time when neither gives a daily cron;""")
+s=s.replace("""Environment: `SLACK_RELEASES""","""Environment: `SLACK_RELEASES""")
+s=s.replace("""`RELEASE_PAUSED` (`post-merge`: `true` says "releases paused" in place of the next release time),""","""`RELEASE_PAUSED` (`post-merge`: `true` says "releases paused" in place of the next release time),
+`RELEASE_CRON` (`post-merge`: the daily cron, when `release.yml` at the commit has none),""")
+open(p,'w').write(s)
+
+p='test/helpers/common.bash'
+s=open(p).read()
+s=s.replace("SLACK_HISTORY_ERROR RELEASE_PAUSED","SLACK_HISTORY_ERROR RELEASE_PAUSED RELEASE_CRON")
+open(p,'w').write(s)
+
+p='test/action_merge.bats'
+s=open(p).read()
+s=s.replace('''@test "post-merge: release_paused reaches the post" {''','''@test "post-merge: a green job that deployed nothing is held; an empty deployed leaves success alone" {
+	step_of post-merge
+	export GITHUB_ACTION_PATH="$BATS_TEST_DIRNAME/../post-merge"
+	land "feat(bot): one (#1)"
+	IN_SHA=$(git rev-parse HEAD) IN_STAGING=success IN_DEPLOYED=false run bash "$FX/step.sh"
+	[ "$status" -eq 0 ]
+	[[ "$(slack_text 1)" == "🟨 *Bot* — "* ]] || false
+	[[ "$(slack_text 1)" == *"|held>"* ]] || false
+
+	land "feat(bot): two (#2)"
+	IN_SHA=$(git rev-parse HEAD) IN_STAGING=success IN_DEPLOYED=true run bash "$FX/step.sh"
+	[[ "$(slack_text 2)" == "🟢 *Bot* — "* ]] || false
+
+	land "feat(bot): three (#3)"
+	IN_SHA=$(git rev-parse HEAD) IN_STAGING=success IN_DEPLOYED="" run bash "$FX/step.sh"
+	[[ "$(slack_text 3)" == "🟢 *Bot* — "* ]] || false
+
+	# a failed job is red whatever its deployed output says
+	land "feat(bot): four (#4)"
+	IN_SHA=$(git rev-parse HEAD) IN_STAGING=failure IN_DEPLOYED=true run bash "$FX/step.sh"
+	[[ "$(slack_text 4)" == "🟥 *Bot* — "* ]] || false
+}
+
+@test "post-merge: release_cron reaches the post when release.yml has no schedule" {
+	step_of post-merge
+	export GITHUB_ACTION_PATH="$BATS_TEST_DIRNAME/../post-merge"
+	land "feat(bot): one (#1)"
+	IN_SHA=$(git rev-parse HEAD) RELEASE_CRON="47 3 * * *" run bash "$FX/step.sh"
+	[[ "$(slack_text 1)" == *"prod ⏳ next release Fri 20 Nov"* || "$(slack_text 1)" == *"prod ⏳ next release Sat 21 Nov 03:47Z" ]] || false
+}
+
+@test "post-merge: release_paused reaches the post" {''')
+s=s.replace("""	export IN_BEFORE="" IN_MIGRATIONS="" IN_STAGING=success IN_DRY_RUN=false""","""	export IN_BEFORE="" IN_MIGRATIONS="" IN_STAGING=success IN_DEPLOYED="" IN_DRY_RUN=false
+	export RELEASE_NOW=2026-11-20T12:00:00Z""")
+s=s.replace("""[[ "$(slack_text 1)" == *"prod ⏳ next release Fri 20 Nov"* || "$(slack_text 1)" == *"prod ⏳ next release Sat 21 Nov 03:47Z" ]] || false""","""[[ "$(slack_text 1)" == *"prod ⏳ next release Sat 21 Nov 03:47Z" ]] || false""")
+s=s.replace("""	grep -q '^  release_paused:'""","""	grep -q '^  deployed:' "$BATS_TEST_DIRNAME/../post-merge/action.yml"
+	grep -q '^  release_cron:' "$BATS_TEST_DIRNAME/../post-merge/action.yml"
+	grep -q '^  release_paused:'""")
+open(p,'w').write(s)
+
+p='test/merge_v2.bats'
+s=open(p).read()
+s=s.replace('''@test "RELEASE_PAUSED=true says releases are paused" {''','''@test "RELEASE_CRON stands in for a release.yml with no schedule, and the file's cron is not consulted then" {
+	cron_workflow "'5 14 * * *'"
+	git commit -q -m "fix: one (#1)"
+	git push -q origin HEAD:refs/heads/master
+	RELEASE_CRON="47 3 * * *" run "$RELEASE" post-merge
+	[[ "$(slack_line 1 2)" == *"prod ⏳ next release Sat 21 Nov 03:47Z" ]] || false
+
+	land "fix: two (#2)"
+	git rm -q -r .github
+	git commit -q -m "chore: no workflow (#3)"
+	git push -q origin HEAD:refs/heads/master
+	RELEASE_CRON="47 3 * * *" run "$RELEASE" post-merge
+	[[ "$(slack_line 2 2)" == *"prod ⏳ next release Sat 21 Nov 03:47Z" ]] || false
+	RELEASE_CRON="not a cron" run "$RELEASE" post-merge --dry-run
+	[[ $output == *"prod ⏳ next release"* && $output != *"Z"$'\\n'* ]] || false
+}
+
+@test "RELEASE_PAUSED=true says releases are paused" {''')
+open(p,'w').write(s)
+EOF
+grep -n "grep -q '^  de" test/action_merge.bats; shellcheck -s bash release.sh test/helpers/bin/gh test/helpers/bin/curl && echo LINT; bats test/action_merge.bats test/merge_v2.bats 2>&1 | grep -v '^ok'
