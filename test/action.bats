@@ -12,6 +12,7 @@ setup() {
 	export GITHUB_ACTION_PATH="$BATS_TEST_DIRNAME/../cut"
 	export IN_KIND=deploy IN_SHA="" IN_SHA_GIVEN="" IN_VERSION="" IN_VERSION_FILE="" IN_NAME="" IN_BRANCH=""
 	export IN_CHANGELOG=CHANGELOG.md IN_DRY_RUN=false IN_BACKFILL=false IN_BUMP_FILE=manifest.config.ts IN_RETRO_NOTE=""
+	export IN_BASE="" IN_REASON="" IN_BY="" IN_SUITE=""
 }
 
 @test "deploy: the sha, two version files, a name" {
@@ -46,4 +47,22 @@ setup() {
 	[ "$(origin_tags | tr '\n' ' ')" = "v0.3.1 v0.4.0 " ]
 	[ "$(git -C "$ORIGIN" log -1 --format=%s 'v0.4.0^{commit}')" = "feat: 0.4.0 (#040)" ]
 	[ "$(slack_posts)" = 1 ]
+}
+
+@test "hotfix: base, reason, by and suite reach the cut" {
+	land "feat: one (#1)"
+	IN_SHA=$(git rev-parse HEAD) run bash "$FX/step.sh"
+	[ "$status" -eq 0 ]
+	git pull -q --ff-only origin master
+	land "fix(auth): urgent (#9)"
+	fix=$(git rev-parse HEAD)
+	git checkout -q -b hotfix/v0.1.1 v0.1.0
+	git commit -q --allow-empty -m "fix(auth): urgent (#9)" -m "(cherry picked from commit $fix)"
+	hf=$(git rev-parse HEAD)
+	git checkout -q master
+	: >"$GITHUB_OUTPUT"
+	IN_KIND=hotfix IN_SHA=$hf IN_SHA_GIVEN=$hf IN_BASE=v0.1.0 IN_REASON="the thread" IN_BY="the PM" IN_SUITE="affected areas green" run bash "$FX/step.sh"
+	[ "$status" -eq 0 ]
+	[ "$(output tag)" = v0.1.1 ]
+	[[ "$(slack_text 2)" == *$'reason: the thread \xc2\xb7 by the PM\nsuite: affected areas green' ]] || false
 }
