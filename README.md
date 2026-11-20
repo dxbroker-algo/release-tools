@@ -70,8 +70,10 @@ line goes in the PR body:
 
 ```markdown
 ## Release note
-Users can now export their data as CSV.
+users: Brokers can now export their contacts as a CSV file.
 ```
+
+The line has a shape of its own: [the release-note check](#the-release-note-check-every-repository).
 
 **The Slack post**, `chat.postMessage` (mrkdwn, unfurling off):
 
@@ -284,65 +286,107 @@ A failed apply cuts nothing.
 
 ### The merge post (a repository that deploys staging on merge)
 
-`post-merge` is the last step of the workflow that deploys master to staging. It posts **one line per
-merge** to the merge channel, once staging has it, and records the post's `ts` on the PR. It is not a
+`post-merge` is the last job of the workflow that deploys master to staging. It posts **one message per
+merge** to the merge channel, in plain words, and **edits it in place** as its state changes. It is not a
 release: nothing is tagged.
 
 ```
-🔀 <PR link|feat(api): add the thing (T-12)> — T-12 · `c7d34ad` · migration `a1b2c3d4` · 🖼 screenshots
+🟢 *Contacts* · for users — Brokers see a Call log tab in Contacts, with missed calls and voicemails (CRM look, staging only)
+frontend <PR link|#786> · T-1698 · asked by Leon · staging ✅ <run|deployed> · prod ⏳ next release Sat 21 Nov 03:47Z · 🖼 screenshots in thread
 ```
 
-- **The title** is the squash title, linked to its PR through the `(#N)` suffix. A commit without one is
-  posted unlinked. `[visual review missing]` moves to the end as `⚠ visual review missing`.
-- **The task** is the first `T-NNN` of the title, else of the squash body.
-- **`migration <id>`** (or `migrations a, b`) names the files the merge **added** under `migrations`
-  (`alembic/versions`): the file's `revision = "…"`, else its name without the extension. An edited
-  migration is not named. A **shallow checkout** has no parent to compare with, so it names none and
-  warns: check out with `fetch-depth: 2`.
-- **`🖼 screenshots`** when the PR carries `release:visual`. The screenshots go in this post's thread.
+| Field | Where it comes from |
+|---|---|
+| the icon | the staging deploy's outcome, the `staging` input: 🟢 `success`, 🟥 `failure` (staging not updated), 🟨 `held` |
+| the area | the title's conventional-commit scope, through the map in `area_map` in `release.sh` (`contacts`, `contact-modal` → Contacts; `crm-shell` → CRM look; `bot`; `broadcast` → Broadcasts; `listing-send` → Listings; `calls`; `agreements`; `release`, `ci` → Release & CI). An unmapped scope shows capitalised as it is, and `pr-title` warns. No scope: no area |
+| the audience and the line | the PR's `## Release note` ([below](#the-release-note-check-every-repository)): `users:` → "for users"; `internal:` and `tests:` show as they are |
+| the repo | the repository's name, without a `dxb-` prefix |
+| the PR | the title's `(#N)`, linked; a commit without one shows its short sha |
+| the task | the first `T-NNN` of the title, else of the squash body |
+| asked by | the note's `asked-by:` line, left out without one |
+| staging | the run's link, and `deployed`, `not updated` or `held` |
+| prod | `next release <day> <time>Z`, computed from the `release_cron` input when set, else the first `cron: 'M H * * *'` in `.github/workflows/release.yml` **at the merged commit**; `next release` with no time when neither gives a daily cron; `releases paused` when the `release_paused` input is `true` |
+| `migration <id>` | the files the merge **added** under `migrations` (`alembic/versions`): the file's `revision = "…"`, else its name without the extension. An edited migration is not named. A **shallow checkout** has no parent to compare with, so it names none and warns: check out with `fetch-depth: 2` |
+| `🖼 screenshots in thread` | the PR carries `release:visual`; the screenshots go in this post's thread |
+
+- **A PR with no valid note** posts the squash title and ends it with `(no release note)`, at the top level.
+  `[visual review missing]` moves to the end as `⚠ visual review missing`.
+- **Internal and tests merges** are not top-level posts. Each is **a reply in a daily thread**, whose parent,
+  `🧰 Internal and test changes, Fri 20 Nov (UTC)`, the first such merge of the UTC day creates:
+
+  ```
+  tests · backend <PR link|#914> · T-1650 — The calls area's tests were cut from 2,448 to 1,232. · <run|staging ✅>
+  ```
+
+  The parent is found by reading the channel's recent history for the bot's own message with that first
+  line, which takes the `channels:history` scope (`groups:history` in a private channel). **Without it**
+  (or when the bot is not in the channel) the merge is posted as the same line at the top level, prefixed
+  `🧰`, with a warning. **A merge that adds a migration or carries `release:visual` is always top level**,
+  whatever its audience.
 - **`before`** is the push's previous head (`github.event.before`). Every merge in `before..sha` is
   posted, oldest first, at most 20, so a train landed in one push is not reduced to its last commit.
   A zero, unknown or non-ancestor `before` posts `sha` alone.
 - **The channel** is `SLACK_MERGES_CHANNEL`, **never** `SLACK_RELEASES_CHANNEL`: once `#releases` is
   renamed, that variable names the other channel. The token is the same bot's `SLACK_RELEASES_BOT_TOKEN`.
 
-**Where the `ts` lives:** a PR comment, `Posted to the merge channel: <permalink>` and
-`<!-- release-tools merge-post: sha=<full sha> ts=1730000000.000100 -->`, and the job's `slack_ts`
-output and summary. To thread the screenshots:
+**One message per merge, edited in place.** Run the job whatever the deploy's outcome and say how it ended
+with `staging` (`success`, `failure` or `held`), so a red deploy is a 🟥 message and not a silence. **A merge
+posted 🟥 or 🟨 is edited to 🟢 by a later green run**: a re-run of the same workflow, or the next push, which
+also looks at the ten merges before its own (they need to be in the checkout: `fetch-depth` deep enough)
+and edits those whose message still says staging lacks them. A message that says 🟢 is never edited back,
+and a re-run with the same state posts and edits nothing.
+
+**Where the `ts` lives:** a PR comment, the merge's handle:
+
+```
+Posted to the merge channel: <permalink>
+
+<!-- release-tools merge-post: sha=<full sha> ts=1730000000.000100 channel=C0… state=success form=top -->
+```
+
+`state` is `success`, `failure` or `held`; `form` is `top`, `reply` (in the daily thread) or `compact`. The
+last such comment for a sha is the handle: a state change writes a new one. A comment with no `state` or
+`form` (an earlier version's) reads as `success` and `top`. To thread the screenshots:
 
 ```sh
 gh pr view N -R OWNER/REPO --json comments -q '.comments[].body' | grep merge-post
 ```
 
-Reply with `thread_ts` set to that `ts`. The same comment is what makes a **re-run of the workflow
-post nothing twice**: a merge whose sha is already recorded on its PR is skipped.
+Reply with `thread_ts` set to that `ts`.
 
 **It is best effort,** like the release post. Slack refusing, a missing token or channel, or a comment
-that cannot be written is a warning on a step that exits 0, and the `posted` output says how many went
-out. It never fails the staging deploy.
+that cannot be written is a warning on a step that exits 0, and the `posted` and `updated` outputs say how
+many went out. It never fails the staging deploy.
 
 ```yaml
   merge-post:
     needs: deploy                    # the job that deploys staging and smoke-tests it
-    if: needs.deploy.result == 'success'
+    if: always() && needs.deploy.result != 'cancelled'
     continue-on-error: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write           # the ts is recorded as a PR comment
+      pull-requests: write           # the handle is a PR comment
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
-          fetch-depth: 2
+          fetch-depth: 12            # the push's merges, and the ten before it
       - uses: dxbroker-algo/release-tools/post-merge@<sha>
         with:
+          staging: ${{ needs.deploy.result }}   # success, or failure
+          deployed: ${{ needs.deploy.outputs.deployed }}   # a green job that deployed nothing is held (🟨)
+          release_cron: ''                      # a repo whose release.yml has no schedule: '47 3 * * *'
+          release_paused: ${{ vars.RELEASE_PAUSED }}
           migrations: alembic/versions         # backend only
           slack_token: ${{ secrets.SLACK_RELEASES_BOT_TOKEN }}
           slack_channel: ${{ vars.SLACK_MERGES_CHANNEL }}
 ```
 
-With a `before` that is more than one commit back, check out `fetch-depth: 0` (a train's commits must be
-present to be read).
+With a `before` that is more than a few commits back, check out `fetch-depth: 0` (a train's commits must be
+present to be read). A green deploy job that deployed nothing (the migration skew) is **held**: pass its `deployed` output, and
+`success` with `deployed` other than `true` reads as 🟨; any result other than `success` reads as 🟥.
+A repository whose `release.yml` has no schedule (the release is chained from another's) passes
+`release_cron` (`M H * * *`) so its posts still say when prod gets the change; empty reads the file.
 
 ### The PR-title check (every repository)
 
@@ -363,6 +407,47 @@ jobs:
 
 Without branch protection the check is advisory. The rule that a red `pr-title` check is not merged
 is a team rule.
+
+### The release-note check (every repository)
+
+The `## Release note` section of a PR body is the line the merge post says in plain words. It holds **one
+line** (and optionally a second, `asked-by:`):
+
+```markdown
+## Release note
+users: Brokers see a Call log tab in Contacts, with missed calls and voicemails (CRM look, staging only).
+asked-by: Leon
+```
+
+1. **The prefix is the audience:** `users:` (a broker or client sees or feels it, a bug fix they would notice
+   included), `internal:` (the team sees it: admin, ops, CI, the release flow), `tests:` (tests or tooling
+   only; no user-facing or runtime change). It is lowercase, then a colon and a space.
+2. **After it, 20 to 200 characters** of plain English for Stas, Leon or Max: what a person can now do, or what
+   is fixed. **No `T-` id** (the post adds the task itself), **no file name** (a word ending in `.py`, `.ts`,
+   `.tsx`, `.js`, `.jsx`, `.yml`, `.yaml`, `.sh`, `.json`, `.md`, `.sql` or `.toml`), **not the PR title**
+   (whole, or after its `type(scope):`), and **no Hebrew or Arabic letters**.
+3. **`asked-by: <name>`**, up to 40 characters, when a person asked for the change.
+
+HTML comments in the section are ignored, so a template can carry its guidance there. The `tests:` prefix is
+not checked against the diff: the reviewer reads the note.
+
+```yaml
+name: pr-note
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]   # `edited`: fixing the body re-runs it, no push needed
+permissions: {}
+jobs:
+  pr-note:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dxbroker-algo/release-tools/pr-note@<sha>
+```
+
+When it fails, the step prints the section it read and the first rule broken. Without branch protection the
+check is advisory, like `pr-title`. A PR that merges without a valid note is posted with its title and
+`(no release note)`. The note is read at merge time, and a body edited after the merge does not change
+the post.
 
 ### Action outputs
 
@@ -407,12 +492,15 @@ release.sh render-history  [--through REF] [--heading TEXT] [--write]
 release.sh post            vX.Y.Z [--kind …] [--force] [--dry-run]
 release.sh backfill-ext    [--bump-file manifest.config.ts] [--retro-note TEXT] [--dry-run]
 release.sh check-title     'feat(scope): subject'
-release.sh post-merge      [--sha SHA] [--before SHA] [--migrations PATH]... [--dry-run]
+release.sh check-note      ['PR title'] < pr-body
+release.sh post-merge      [--sha SHA] [--before SHA] [--migrations PATH]... [--staging success|failure|held] [--dry-run]
 release.sh --help
 ```
 
 Environment: `SLACK_RELEASES_BOT_TOKEN`, `SLACK_RELEASES_CHANNEL` (`post-merge` reads
 `SLACK_MERGES_CHANNEL` instead), `GH_TOKEN` (for `gh`),
+`RELEASE_PAUSED` (`post-merge`: `true` says "releases paused" in place of the next release time),
+`RELEASE_CRON` (`post-merge`: the daily cron, when `release.yml` at the commit has none),
 `SLACK_API_URL` (tests), `RELEASE_NOW` (tests), `RELEASE_GIT_NAME` / `RELEASE_GIT_EMAIL` (the release
 commit's author, `github-actions[bot]` by default).
 
