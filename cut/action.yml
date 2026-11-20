@@ -49,8 +49,11 @@ inputs:
   suite:
     description: "kind hotfix: the post's `suite:` line. Empty: no line."
     default: ""
+  migrations:
+    description: "kinds deploy and hotfix: the directories whose new files are migrations (alembic/versions); space-separated; the same value post-merge got. The cut edits each merge post in its range to say prod has it, and writes the post again from its sources: without this the post loses its `migration <id>` field."
+    default: ""
   github_token:
-    description: "Needs contents: write (the tag, the Release, the commit)."
+    description: "Needs contents: write (the tag, the Release, the commit), and pull-requests: write for the merge posts it marks (it records each edit on the PR; without it the post is still edited)."
     default: ${{ github.token }}
   slack_token:
     description: "The Slack bot token (chat:write). Empty: the release is cut, the post is skipped."
@@ -99,6 +102,7 @@ runs:
         IN_REASON: ${{ inputs.reason }}
         IN_BY: ${{ inputs.by }}
         IN_SUITE: ${{ inputs.suite }}
+        IN_MIGRATIONS: ${{ inputs.migrations }}
         GH_TOKEN: ${{ inputs.github_token }}
         SLACK_RELEASES_BOT_TOKEN: ${{ inputs.slack_token }}
         SLACK_RELEASES_CHANNEL: ${{ inputs.slack_channel }}
@@ -123,4 +127,5 @@ runs:
         [ -z "$IN_REASON" ] || args+=(--reason "$IN_REASON")
         [ -z "$IN_BY" ] || args+=(--by "$IN_BY")
         [ -z "$IN_SUITE" ] || args+=(--suite "$IN_SUITE")
+        for m in $IN_MIGRATIONS; do args+=(--migrations "$m"); done
         "$script" cut "${args[@]}"

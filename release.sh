@@ -3,7 +3,9 @@
 #
 #   cut             the version, an annotated tag on the shipped sha, a GitHub
 #                   Release, one Slack post, then CHANGELOG.md and the version
-#                   file committed to the default branch (kind hotfix: no commit)
+#                   file committed to the default branch (kind hotfix: no commit);
+#                   kinds deploy and hotfix then edit the merge post of each PR
+#                   they ship to say prod has it
 #   render A B      print the CHANGELOG entry the range A..B gives today
 #   render-history  print (or --write) the retro section: every first-parent
 #                   commit, by month
@@ -64,8 +66,10 @@ Options (any subcommand):
   --force                     post: post although the Release records a post
   --before SHA                post-merge: the push's previous head; every merge in
                               SHA..--sha is posted (default: --sha alone)
-  --migrations PATH           post-merge: a directory whose new files are
-                              migrations (alembic/versions); repeatable
+  --migrations PATH           post-merge, cut: a directory whose new files are
+                              migrations (alembic/versions); repeatable. The cut
+                              needs the post-merge's value to keep the post's
+                              `migration <id>` field when it edits the post
   --staging STATE             post-merge: how the staging deploy ended: success
                               (default), failure or held
   --base vX.Y.Z               hotfix: the release the hotfix patches; must be the
@@ -76,7 +80,8 @@ Options (any subcommand):
   --suite TEXT                hotfix: the post's `suite:` line (default: none)
 
 Environment: SLACK_RELEASES_BOT_TOKEN, SLACK_RELEASES_CHANNEL (post-merge reads
-SLACK_MERGES_CHANNEL instead), SLACK_API_URL, RELEASE_PAUSED (post-merge: "true"
+SLACK_MERGES_CHANNEL instead; the cut edits each merge post in the channel its
+handle names), SLACK_API_URL, RELEASE_PAUSED (post-merge: "true"
 says "releases paused" in place of the next release time), RELEASE_CRON (post-merge: the
 release's daily cron, "M H * * *", when release.yml at the commit has none),
 GH_TOKEN, RELEASE_NOW (an ISO time, for tests), RELEASE_GIT_NAME/EMAIL.
@@ -113,6 +118,8 @@ BY=""
 SUITE=""
 HF_BASE=""
 HF_LOADED=""
+PROD_TAG=""
+PROD_KIND=""
 POS1=""
 POS2=""
 NPOS=0
@@ -807,6 +814,16 @@ next_release_text() {
 	printf 'prod ⏳ next release'
 }
 
+# prod_text: the prod field of a merge post the cut marked, from PROD_TAG and PROD_KIND.
+# A release says when it was cut; a hotfix says only which patch.
+prod_text() {
+	if [ "$PROD_KIND" = hotfix ]; then
+		printf 'prod 🩹 %s' "$PROD_TAG"
+	else
+		printf 'prod ✅ %s, %sZ' "$PROD_TAG" "$(fmt_epoch "$(epoch_of "$NOW_ISO")" '%a %d %b %H:%M')"
+	fi
+}
+
 # ------------------------------------------------------------------ slack --
 
 mrkdwn_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
@@ -929,6 +946,7 @@ merge_render() {
 	failure) icon=🟥 sicon=🟥 sword="not updated" ;;
 	held) icon=🟨 sicon=🟨 sword=held ;;
 	esac
+	[ -z "$PROD_TAG" ] || icon=✅
 	repo=${REPO##*/}
 	repo=${repo#dxb-}
 	task=$(printf '%s\n' "$P_DISPLAY" | grep -Eo 'T-[0-9]+' | sed -n 1p || true)
@@ -943,6 +961,7 @@ merge_render() {
 		[ "$STAGING" = success ] || stg="$stg $sword"
 		if [ -n "$RUN_URL" ]; then stg="<$RUN_URL|$stg>"; fi
 		first="$first · $stg"
+		[ -z "$PROD_TAG" ] || first="$first · $(prod_text)"
 		[ "$P_VISUAL" != 1 ] || first="$first ⚠ visual review missing"
 		if [ "$form" = compact ]; then first="🧰 $first"; fi
 		MERGE_TEXT=$first
@@ -962,7 +981,8 @@ merge_render() {
 	[ -z "$task" ] || second="$second · $task"
 	[ -z "$NOTE_ASKED" ] || second="$second · asked by $(mrkdwn_escape "$NOTE_ASKED")"
 	if [ -n "$RUN_URL" ]; then stg="<$RUN_URL|$sword>"; else stg=$sword; fi
-	second="$second · staging $sicon $stg · $(next_release_text "$sha")"
+	if [ -n "$PROD_TAG" ]; then rest=$(prod_text); else rest=$(next_release_text "$sha"); fi
+	second="$second · staging $sicon $stg · $rest"
 	if [ -n "$migs" ]; then
 		rest=$migs
 		m=""
@@ -1429,6 +1449,7 @@ cmd_cut() {
 	create_release "$tag" "$SHA" "$WORK/notes.md"
 	summary "### $NAME $tag" "" "$(cat "$WORK/notes.md")"
 	announce "$tag" "$SHA"
+	mark_in_prod "$start" "$SHA" "$tag" release
 	write_output action release
 	write_output released true
 	changelog_commit || ok=1
@@ -1491,9 +1512,19 @@ cut_hotfix() {
 	create_release "$tag" "$SHA" "$WORK/notes.md"
 	summary "### $NAME $tag (hotfix on $base)" "" "$(cat "$WORK/notes.md")"
 	announce "$tag" "$SHA"
+	mark_in_prod "$base" "$SHA" "$tag" hotfix
 	write_output action release
 	write_output released true
 	return 0
+}
+
+# mark_recovered TAG START: a release finished after a crash marks its merge posts too
+mark_recovered() {
+	if [ "$KIND" = hotfix ]; then
+		mark_in_prod "$(hotfix_base "$SHA")" "$SHA" "$1" hotfix
+	else
+		mark_in_prod "$2" "$SHA" "$1" release
+	fi
 }
 
 # the sha already carries a release tag: finish what a crash left undone, else
@@ -1511,10 +1542,12 @@ cut_existing() {
 			release_body_new "$tag" "$SHA" >"$WORK/notes.md"
 			create_release "$tag" "$SHA" "$WORK/notes.md"
 			announce "$tag" "$SHA"
+			mark_recovered "$tag" "$start"
 			posted=1
 		elif grep -q '^Slack: pending$' "$body"; then
 			collect "$start" "$SHA"
 			announce "$tag" "$SHA"
+			mark_recovered "$tag" "$start"
 			posted=1
 		fi
 	fi
@@ -1684,11 +1717,14 @@ merge_commits() {
 }
 
 # merge_handle PR SHA: the merge's handle, the last comment this tool wrote for SHA on
-# the PR. Sets H_TS H_CHANNEL H_STATE H_FORM. Status 0 found, 1 none, 2 gh cannot say.
-# A comment written before the state and the form were recorded reads as top and success.
+# the PR. Sets H_TS H_CHANNEL H_STATE H_FORM H_STG H_RUN. Status 0 found, 1 none, 2 gh
+# cannot say. A comment written before the state and the form were recorded reads as top
+# and success. H_STATE is success, failure or held (what staging did), or prod (the
+# release cut marked the post): then H_STG is what staging did, and H_RUN is the
+# staging run's link, so the post can be written again.
 merge_handle() {
 	local line
-	H_TS="" H_CHANNEL="" H_STATE="" H_FORM=""
+	H_TS="" H_CHANNEL="" H_STATE="" H_FORM="" H_STG="" H_RUN=""
 	[ "$NO_GH" = 0 ] || return 1
 	if ! gh pr view "$1" --repo "$REPO" --json comments >"$WORK/comments-$1.json" 2>"$WORK/gh.err" </dev/null; then
 		warn "gh pr view $1: $(sed -n 1p "$WORK/gh.err"); cannot tell whether this merge was posted"
@@ -1702,16 +1738,25 @@ merge_handle() {
 	H_CHANNEL=$(sed -nE 's/.* channel=([^ ]*).*/\1/p' <<<"$line")
 	H_STATE=$(sed -nE 's/.* state=([^ ]*).*/\1/p' <<<"$line")
 	H_FORM=$(sed -nE 's/.* form=([^ ]*).*/\1/p' <<<"$line")
+	H_STG=$(sed -nE 's/.* stg=([^ ]*).*/\1/p' <<<"$line")
+	H_RUN=$(sed -nE 's/.* run=([^ ]*).*/\1/p' <<<"$line")
 	[ -n "$H_STATE" ] || H_STATE=success
 	[ -n "$H_FORM" ] || H_FORM=top
 	return 0
 }
 
-# merge_record PR SHA FORM: the handle goes on the PR, where the PM finds the ts to
-# thread the screenshots and where the next run finds the message to edit
+# merge_record PR SHA FORM [TAG]: the handle goes on the PR, where the PM finds the ts to
+# thread the screenshots and where the next run finds the message to edit. With TAG the
+# release cut marked the post as in prod: state=prod, and stg= keeps what staging did.
 merge_record() {
-	printf 'Posted to the merge channel: %s\n\n<!-- release-tools merge-post: sha=%s ts=%s channel=%s state=%s form=%s -->\n' \
-		"$SLACK_PERMALINK" "$(git rev-parse "$2")" "$SLACK_TS" "$SLACK_CHANNEL" "$STAGING" "$3" >"$WORK/record.md"
+	local state=$STAGING extra=""
+	[ -z "$RUN_URL" ] || extra=" run=$RUN_URL"
+	if [ -n "${4:-}" ]; then
+		state=prod
+		extra="$extra stg=$STAGING tag=$4"
+	fi
+	printf 'Posted to the merge channel: %s\n\n<!-- release-tools merge-post: sha=%s ts=%s channel=%s state=%s form=%s%s -->\n' \
+		"$SLACK_PERMALINK" "$(git rev-parse "$2")" "$SLACK_TS" "$SLACK_CHANNEL" "$state" "$3" "$extra" >"$WORK/record.md"
 	gh pr comment "$1" --repo "$REPO" --body-file "$WORK/record.md" >/dev/null </dev/null ||
 		warn "could not record the post's ts on PR #$1 (the job needs pull-requests: write)"
 }
@@ -1803,6 +1848,84 @@ handle_merge() {
 	else
 		FAILED=$((FAILED + 1))
 		warn "merge $short not posted: $SLACK_ERROR"
+	fi
+	return 0
+}
+
+# ------------------------------------------------------ the cut marks posts --
+
+# mark_one SUBJECT SHA: edit the merge post of the PR in SUBJECT to say prod has it
+# (PROD_TAG, PROD_KIND), and record that on the PR. SHA is the commit on the branch that
+# the merge post was written for. Status 2 when gh cannot say, so the caller stops
+# asking; else 0: a commit with no PR, a PR with no handle and one already in prod are
+# skipped, and a failed edit is counted.
+mark_one() {
+	local subject=$1 sha=$2 pr visual=0 migs hrc=0 saved_run=$RUN_URL saved_staging=$STAGING
+	parse_title "$subject"
+	pr=$P_PR
+	[ -n "$pr" ] || return 0
+	git cat-file -e "$sha^{commit}" 2>/dev/null || return 0
+	merge_handle "$pr" "$sha" || hrc=$?
+	[ "$hrc" != 2 ] || return 2
+	[ "$hrc" = 0 ] || return 0
+	# a post that already says prod stays: a hotfix's, when the daily release comes
+	[ "$H_STATE" != prod ] || return 0
+	STAGING=${H_STG:-$H_STATE}
+	case $STAGING in success | failure | held) ;; *) STAGING=success ;; esac
+	RUN_URL=$H_RUN
+	pr_fetch "$pr"
+	if pr_has_label "$pr" release:visual; then visual=1; fi
+	pr_release_note "$pr" >"$WORK/note.txt"
+	note_parse "$WORK/note.txt" "$subject" || true
+	migs=$(merge_migrations "$sha")
+	merge_render "$sha" "$pr" "$visual" "$migs" "$H_FORM"
+	# the post lives in the channel its handle names, which is not the releases channel
+	SLACK_POST_CHANNEL=${H_CHANNEL:-${SLACK_MERGES_CHANNEL:-}}
+	if slack_update "$H_TS" "$MERGE_TEXT" "$H_CHANNEL"; then
+		MARKED=$((MARKED + 1))
+		log "marked #$pr in prod as $PROD_TAG (ts $H_TS)"
+		merge_record "$pr" "$sha" "$H_FORM" "$PROD_TAG"
+	else
+		MARK_FAILED=$((MARK_FAILED + 1))
+		warn "merge post of #$pr not marked: $SLACK_ERROR"
+	fi
+	RUN_URL=$saved_run
+	STAGING=$saved_staging
+	return 0
+}
+
+MARKED=0 MARK_FAILED=0
+
+# mark_in_prod START END TAG KIND: the release (KIND release) or the hotfix (KIND hotfix)
+# TAG is on prod: edit the merge post of every PR in START..END. Best effort, after the
+# deploy and the Slack post: never fails the cut. A hotfix's commits are cherry-picks, so
+# the post is found by the commit the "(cherry picked from commit …)" trailer names.
+mark_in_prod() {
+	local start=$1 end=$2 sha subject orig rc
+	case $KIND in deploy | hotfix) ;; *) return 0 ;; esac
+	[ "$DRY_RUN" = 0 ] || return 0
+	if [ -z "${SLACK_RELEASES_BOT_TOKEN:-}" ]; then
+		log "no merge posts marked: no Slack token"
+		return 0
+	fi
+	PROD_TAG=$3 PROD_KIND=$4
+	MARKED=0 MARK_FAILED=0
+	range_lines "$start" "$end" >"$WORK/mark.range"
+	while IFS="$(printf '\t')" read -r sha subject <&5; do
+		[ -n "$sha" ] || continue
+		if [ "$PROD_KIND" = hotfix ]; then
+			orig=$(git log -1 --format=%B "$sha" | grep -Eo 'cherry picked from commit [0-9a-f]{40}' | tail -1 | awk '{print $5}' || true)
+			[ -n "$orig" ] || continue
+			sha=$orig
+		fi
+		rc=0
+		mark_one "$subject" "$sha" || rc=$?
+		[ "$rc" != 2 ] || break
+	done 5<"$WORK/mark.range"
+	PROD_TAG="" PROD_KIND=""
+	unset SLACK_POST_CHANNEL
+	if [ "$MARKED" -gt 0 ] || [ "$MARK_FAILED" -gt 0 ]; then
+		summary "Merge posts marked in prod: $MARKED$([ "$MARK_FAILED" = 0 ] || printf ', failed: %s' "$MARK_FAILED")"
 	fi
 	return 0
 }
