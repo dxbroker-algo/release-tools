@@ -1,9 +1,10 @@
 name: release-tools post-merge
 description: >-
-  Post one line per merge to the merge channel once staging has the merge: the PR title and link,
-  the task, the short sha, the migration, and "screenshots" when the PR carries release:visual.
-  The post's ts is recorded on the PR, so screenshots can go in its thread. Best effort: it never
-  fails the deploy.
+  Post one message per merge to the merge channel: the PR's `## Release note` in plain words, the
+  product area, the PR, the task, whether staging has it and when prod gets it, the migration, and
+  "screenshots" when the PR carries release:visual. An internal or tests merge is a reply in a daily
+  thread. The message is edited in place when its staging state changes. The post's ts is recorded
+  on the PR, so screenshots can go in its thread. Best effort: it never fails the deploy.
 inputs:
   sha:
     description: "The merged commit. Default: github.sha."
@@ -23,6 +24,12 @@ inputs:
   slack_channel:
     description: "The merge channel's id (SLACK_MERGES_CHANNEL)."
     default: ""
+  staging:
+    description: "How the staging deploy ended: success, held (the migration skew), or failure (any other result: failure, skipped). Pass needs.<deploy>.result. A merge posted red or held is edited to green by a later green run."
+    default: "success"
+  release_paused:
+    description: "vars.RELEASE_PAUSED: when 'true', the post says releases are paused in place of the next release time."
+    default: ""
   dry_run:
     description: "true: print the Slack text, post nothing."
     default: "false"
@@ -30,6 +37,9 @@ outputs:
   posted:
     description: "How many merges were posted"
     value: ${{ steps.post.outputs.posted }}
+  updated:
+    description: "How many earlier posts were edited (a red or held merge that is now green)"
+    value: ${{ steps.post.outputs.updated }}
   slack_ts:
     description: "The last post's ts: reply with thread_ts set to it"
     value: ${{ steps.post.outputs.slack_ts }}
@@ -42,14 +52,19 @@ runs:
         IN_SHA: ${{ inputs.sha || github.sha }}
         IN_BEFORE: ${{ inputs.before }}
         IN_MIGRATIONS: ${{ inputs.migrations }}
+        IN_STAGING: ${{ inputs.staging }}
         IN_DRY_RUN: ${{ inputs.dry_run }}
+        RELEASE_PAUSED: ${{ inputs.release_paused }}
         GH_TOKEN: ${{ inputs.github_token }}
         SLACK_RELEASES_BOT_TOKEN: ${{ inputs.slack_token }}
         SLACK_MERGES_CHANNEL: ${{ inputs.slack_channel }}
       run: |
         set -euo pipefail
         script="$GITHUB_ACTION_PATH/../release.sh"
-        args=(--sha "$IN_SHA")
+        staging=${IN_STAGING:-success}
+        # a job result other than success is staging not updated: failure, skipped, cancelled
+        case $staging in success | failure | held) ;; *) staging=failure ;; esac
+        args=(--sha "$IN_SHA" --staging "$staging")
         [ -z "$IN_BEFORE" ] || args+=(--before "$IN_BEFORE")
         [ "$IN_DRY_RUN" != true ] || args+=(--dry-run)
         for m in $IN_MIGRATIONS; do args+=(--migrations "$m"); done

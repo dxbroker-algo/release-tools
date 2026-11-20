@@ -2,6 +2,7 @@ name: test
 
 on:
   pull_request:
+    types: [opened, edited, synchronize, reopened]
   push:
     branches: [master]
 
@@ -14,11 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
       - name: Install bats
+        if: github.event.action != 'edited'
         run: sudo apt-get update -q && sudo apt-get install -y -q bats
       - name: shellcheck
+        if: github.event.action != 'edited'
         run: shellcheck -s bash release.sh test/helpers/bin/gh test/helpers/bin/curl
       - name: bats
+        if: github.event.action != 'edited'
         run: bats --print-output-on-failure test/
       - name: check this PR's title with the action it ships
         if: github.event_name == 'pull_request'
         uses: ./pr-title
+      - name: check this PR's release note with the action it ships
+        if: github.event_name == 'pull_request'
+        uses: ./pr-note

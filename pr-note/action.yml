@@ -1,0 +1,22 @@
+name: release-tools pr-note
+description: >-
+  Fail when the PR body has no valid `## Release note`: one line, `users:`, `internal:` or `tests:`
+  and a plain sentence of 20-200 characters, and optionally an `asked-by: <name>` line. The line
+  is what the merge post says in plain words, so a body edit re-runs the check (`pull_request:
+  edited`) and the fix is an edit, not a push.
+inputs:
+  title:
+    description: "The PR title: the note must not repeat it."
+    default: ${{ github.event.pull_request.title }}
+  body:
+    description: "The PR body to read the note from."
+    default: ${{ github.event.pull_request.body }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TITLE: ${{ inputs.title }}
+        BODY: ${{ inputs.body }}
+      run: |
+        printf '%s\n' "$BODY" | "$GITHUB_ACTION_PATH/../release.sh" check-note "$TITLE"

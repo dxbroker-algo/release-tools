@@ -11,8 +11,9 @@
 #                   record it in the Release (the one edit a Release gets)
 #   backfill-ext    tag a browser extension's history at its manifest bump commits
 #   check-title T   exit 0 when T is a valid PR title (it becomes the squash title)
-#   post-merge      post one line per merge to the merge channel (staging), and
-#                   record the post's ts on the PR
+#   check-note      exit 0 when the PR body (stdin) has a valid `## Release note`
+#   post-merge      post one message per merge to the merge channel (staging), edit
+#                   it as its state changes, and record its ts on the PR
 #
 # Needs bash 3.2+, git, gh, jq and curl. Nothing about the calling repository is
 # stored here: everything is read from it at run time. See README.md.
@@ -29,7 +30,7 @@ die() {
 }
 
 usage() {
-	sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
 	cat <<'EOF'
 
 Options (any subcommand):
@@ -63,9 +64,12 @@ Options (any subcommand):
                               SHA..--sha is posted (default: --sha alone)
   --migrations PATH           post-merge: a directory whose new files are
                               migrations (alembic/versions); repeatable
+  --staging STATE             post-merge: how the staging deploy ended: success
+                              (default), failure or held
 
 Environment: SLACK_RELEASES_BOT_TOKEN, SLACK_RELEASES_CHANNEL (post-merge reads
-SLACK_MERGES_CHANNEL instead), SLACK_API_URL,
+SLACK_MERGES_CHANNEL instead), SLACK_API_URL, RELEASE_PAUSED (post-merge: "true"
+says "releases paused" in place of the next release time),
 GH_TOKEN, RELEASE_NOW (an ISO time, for tests), RELEASE_GIT_NAME/EMAIL.
 EOF
 }
@@ -93,6 +97,7 @@ RETRO_NOTE=""
 FORCE=0
 BEFORE=""
 MIGRATIONS=""
+STAGING=success
 POS1=""
 POS2=""
 NPOS=0
@@ -110,7 +115,7 @@ parse_opts() {
 			;;
 		--kind | --sha | --version | --version-file | --name | --repo | --branch | --remote | \
 			--changelog | --run-url | --run-label | --through | --heading | --bump-file | --retro-note | \
-			--before | --migrations)
+			--before | --migrations | --staging)
 			[ $# -ge 2 ] || die "$1 needs a value"
 			case $1 in
 			--kind) KIND=$2 ;;
@@ -130,6 +135,7 @@ parse_opts() {
 			--retro-note) RETRO_NOTE=$2 ;;
 			--before) BEFORE=$2 ;;
 			--migrations) MIGRATIONS="$MIGRATIONS $2" ;;
+			--staging) STAGING=$2 ;;
 			esac
 			shift
 			;;
@@ -146,6 +152,7 @@ parse_opts() {
 		shift
 	done
 	case $KIND in deploy | store | apply) ;; *) die "--kind must be deploy, store or apply" ;; esac
+	case $STAGING in success | failure | held) ;; *) die "--staging must be success, failure or held" ;; esac
 	if [ -n "$VERSION" ] && ! is_semver "$VERSION"; then die "--version $VERSION is not X.Y.Z"; fi
 	return 0
 }
@@ -319,7 +326,8 @@ parse_title() {
 	local re_visual='^\[visual review missing\] (.*)$'
 	local re_pr='^(.*) \(#([0-9]+)\)$'
 	local re_conv='^([a-z]+)(\([^)]*\))?(!)?: .+$'
-	P_VISUAL=0 P_PR="" P_TYPE="" P_BANG=0
+	P_VISUAL=0 P_PR="" P_TYPE="" P_BANG=0 P_SCOPE=""
+	# P_SCOPE: the conventional-commit scope, without its parentheses
 	if [[ $t =~ $re_visual ]]; then
 		P_VISUAL=1
 		t=${BASH_REMATCH[1]}
@@ -331,6 +339,9 @@ parse_title() {
 	P_DISPLAY=$t
 	if [[ $t =~ $re_conv ]]; then
 		P_TYPE=${BASH_REMATCH[1]}
+		P_SCOPE=${BASH_REMATCH[2]}
+		P_SCOPE=${P_SCOPE#\(}
+		P_SCOPE=${P_SCOPE%\)}
 		if [ -n "${BASH_REMATCH[3]}" ]; then P_BANG=1; fi
 	fi
 	return 0
@@ -372,11 +383,11 @@ pr_has_label() {
 	jq -e --arg l "$2" '(.labels // []) | map(.name) | index($l) != null' "$WORK/pr-$1.json" >/dev/null
 }
 
-# the "## Release note" section of a PR body, without HTML comments. The awk stops
-# at the next heading, so it reads a file: on a pipe, whatever was still writing
-# would take SIGPIPE, and pipefail would fail the release.
-pr_release_note() {
-	jq -r '.body // ""' "$WORK/pr-$1.json" | tr -d '\r' >"$WORK/pr-$1.body"
+# note_section_of FILE: the "## Release note" section of a PR body (a file, with no
+# carriage returns), without HTML comments. The awk stops at the next heading, so it
+# reads a file: on a pipe, whatever was still writing would take SIGPIPE, and
+# pipefail would fail the release.
+note_section_of() {
 	awk '
 		/^##[ \t]+[Rr]elease [Nn]otes?[ \t]*$/ { ins = 1; next }
 		ins && /^#{1,2}[ \t]/ { exit }
@@ -398,7 +409,13 @@ pr_release_note() {
 			first = 0; last = 0
 			for (i = 1; i <= n; i++) if (l[i] ~ /[^ \t]/) { if (!first) first = i; last = i }
 			if (first) for (i = first; i <= last; i++) print l[i]
-		}' "$WORK/pr-$1.body"
+		}' "$1"
+}
+
+# the "## Release note" section of PR $1, from the body gh gave
+pr_release_note() {
+	jq -r '.body // ""' "$WORK/pr-$1.json" | tr -d '\r' >"$WORK/pr-$1.body"
+	note_section_of "$WORK/pr-$1.body"
 }
 
 # ---------------------------------------------------------------- collect --
@@ -516,6 +533,168 @@ render_tag_entry() {
 	render_entry "${tag#v}" "$(tag_date "$tag")" "$(facts_line "$FACT" "$end" "$run_url" "${run_label:-run}" "$permalink" "$retro")"
 }
 
+# ----------------------------------------------------- the release note --
+
+# the area a conventional-commit scope reads as in a merge post: the scopes the map
+# knows, else nothing (area_of then shows the scope as it is, and `pr-title` warns)
+area_map() {
+	case $1 in
+	contacts | contact-modal) printf 'Contacts' ;;
+	crm-shell) printf 'CRM look' ;;
+	bot) printf 'Bot' ;;
+	broadcast) printf 'Broadcasts' ;;
+	listing-send) printf 'Listings' ;;
+	calls) printf 'Calls' ;;
+	agreements) printf 'Agreements' ;;
+	release | ci) printf 'Release & CI' ;;
+	esac
+}
+
+# area_of SCOPE: the mapped area, else the scope with its first letter capitalised
+area_of() {
+	local a
+	[ -n "$1" ] || return 0
+	a=$(area_map "$1")
+	if [ -n "$a" ]; then
+		printf '%s' "$a"
+	else
+		printf '%s%s' "$(printf '%s' "${1:0:1}" | tr '[:lower:]' '[:upper:]')" "${1:1}"
+	fi
+}
+
+trim() {
+	local v=$1
+	v=${v#"${v%%[![:space:]]*}"}
+	v=${v%"${v##*[![:space:]]}"}
+	printf '%s' "$v"
+}
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# characters, not bytes: UTF-8 continuation bytes are not characters
+char_len() { printf '%s' "$1" | LC_ALL=C tr -d '\200-\277' | LC_ALL=C wc -c | tr -d ' '; }
+
+# Hebrew and Arabic letters: the UTF-8 lead bytes D6-DB cover U+0580-06FF
+has_rtl_letters() {
+	[ "$(printf '%s' "$1" | LC_ALL=C tr -cd '\326-\333' | LC_ALL=C wc -c | tr -d ' ')" -gt 0 ]
+}
+
+NOTE_AUDIENCE="" NOTE_TEXT="" NOTE_ASKED="" NOTE_ERR=""
+
+# note_parse FILE TITLE: FILE is the "## Release note" section. Sets NOTE_AUDIENCE
+# (users, internal or tests), NOTE_TEXT and NOTE_ASKED and returns 0, or sets NOTE_ERR
+# to the first rule broken and returns 1.
+note_parse() {
+	local l n=0 first="" second="" text len core subject name cmp
+	local re_first='^(users|internal|tests):[[:space:]]+(.+)$'
+	local re_asked='^asked-by:[[:space:]]*(.*)$'
+	local re_tid='(^|[^A-Za-z0-9])T-[0-9]+'
+	local re_file='[A-Za-z0-9_/-]+\.(py|ts|tsx|js|jsx|yml|yaml|sh|json|md|sql|toml)([^A-Za-z0-9]|$)'
+	local re_pr='^(.*) \(#[0-9]+\)$'
+	NOTE_AUDIENCE="" NOTE_TEXT="" NOTE_ASKED="" NOTE_ERR=""
+	while IFS= read -r l || [ -n "$l" ]; do
+		l=$(trim "$l")
+		[ -n "$l" ] || continue
+		n=$((n + 1))
+		case $n in 1) first=$l ;; 2) second=$l ;; esac
+	done <"$1"
+	if [ "$n" = 0 ]; then
+		NOTE_ERR='the PR body has no "## Release note" line: add the heading and one line, "users:", "internal:" or "tests:" and a plain sentence'
+		return 1
+	fi
+	if [ "$n" -gt 2 ]; then
+		NOTE_ERR="the section holds $n lines: it holds one line, and optionally an \"asked-by:\" line"
+		return 1
+	fi
+	if ! [[ $first =~ $re_first ]]; then
+		NOTE_ERR='the line must start with "users: ", "internal: " or "tests: "'
+		return 1
+	fi
+	NOTE_AUDIENCE=${BASH_REMATCH[1]}
+	text=${BASH_REMATCH[2]}
+	len=$(char_len "$text")
+	if [ "$len" -lt 20 ] || [ "$len" -gt 200 ]; then
+		NOTE_ERR="the sentence after the prefix is $len characters: it is 20 to 200"
+		return 1
+	fi
+	if has_rtl_letters "$text"; then
+		NOTE_ERR="the sentence has Hebrew or Arabic letters: the channels are English"
+		return 1
+	fi
+	if [[ $text =~ $re_tid ]]; then
+		NOTE_ERR="the sentence has a T- id: the post adds the task itself"
+		return 1
+	fi
+	if [[ $text =~ $re_file ]]; then
+		NOTE_ERR="the sentence names a file: say what a person can now do, or what is fixed"
+		return 1
+	fi
+	if [ -n "$2" ]; then
+		core=${2#\[visual review missing\] }
+		if [[ $core =~ $re_pr ]]; then core=${BASH_REMATCH[1]}; fi
+		subject=${core#*: }
+		cmp=$(lower "${text%.}")
+		if [ "$cmp" = "$(lower "$core")" ] || [ "$cmp" = "$(lower "$subject")" ]; then
+			NOTE_ERR="the sentence repeats the PR title: write it for a reader who has not seen the title"
+			return 1
+		fi
+	fi
+	if [ -n "$second" ]; then
+		if ! [[ $second =~ $re_asked ]]; then
+			NOTE_ERR='the second line must read "asked-by: <name>"'
+			return 1
+		fi
+		name=$(trim "${BASH_REMATCH[1]}")
+		if [ -z "$name" ]; then
+			NOTE_ERR='"asked-by:" has no name'
+			return 1
+		fi
+		if [ "$(char_len "$name")" -gt 40 ]; then
+			NOTE_ERR="asked-by is up to 40 characters, this one is $(char_len "$name")"
+			return 1
+		fi
+		NOTE_ASKED=$name
+	fi
+	NOTE_TEXT=$text
+	return 0
+}
+
+# ---------------------------------------------------------------- dates --
+
+# epoch_of 2026-11-20T12:00:00Z (GNU date, else BSD date)
+epoch_of() {
+	date -u -d "$1" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null
+}
+
+fmt_epoch() { # epoch format
+	LC_ALL=C date -u -d "@$1" +"$2" 2>/dev/null || LC_ALL=C date -u -r "$1" +"$2"
+}
+
+# next_release_text SHA: the prod field of a merge post. The next scheduled release is
+# read from the cron in .github/workflows/release.yml at SHA (a daily "M H * * *"); a
+# repository with no such cron says "next release" without a time.
+next_release_text() {
+	local cron m="" h="" dom="" mon="" dow="" now today0 cand
+	if [ "${RELEASE_PAUSED:-}" = true ]; then
+		printf 'prod ⏸ releases paused'
+		return 0
+	fi
+	cron=$(git show "$1:.github/workflows/release.yml" 2>/dev/null |
+		sed -nE "s/^[[:space:]-]*cron:[[:space:]]*['\"]?([^'\"#]*).*/\1/p" | sed -n 1p || true)
+	read -r m h dom mon dow _ <<<"$cron" || true
+	if [[ $m =~ ^[0-9]+$ && $h =~ ^[0-9]+$ && "$dom$mon$dow" == '***' ]] && [ "$m" -lt 60 ] && [ "$h" -lt 24 ]; then
+		now=$(epoch_of "$NOW_ISO") || now=""
+		today0=$(epoch_of "${TODAY}T00:00:00Z") || today0=""
+		if [ -n "$now" ] && [ -n "$today0" ]; then
+			cand=$((today0 + 10#$h * 3600 + 10#$m * 60))
+			[ "$cand" -gt "$now" ] || cand=$((cand + 86400))
+			printf 'prod ⏳ next release %sZ' "$(fmt_epoch "$cand" '%a %d %b %H:%M')"
+			return 0
+		fi
+	fi
+	printf 'prod ⏳ next release'
+}
+
 # ------------------------------------------------------------------ slack --
 
 mrkdwn_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
@@ -574,17 +753,52 @@ slack_redeploy_text() { # label sha detail
 	printf '%s\n' "$s"
 }
 
-# slack_merge_text sha pr visual migrations-csv  (after parse_title on the subject)
-slack_merge_text() {
-	local sha=$1 pr=$2 visual=$3 migs=$4 title task="" s m rest
-	title=$(mrkdwn_escape "$P_DISPLAY" | tr '|' '¦')
-	if [ -n "$pr" ]; then s="<$REPO_URL/pull/$pr|$title>"; else s=$title; fi
-	[ "$P_VISUAL" != 1 ] || s="$s ⚠ visual review missing"
+# merge_render SHA PR VISUAL MIGS FORM: sets MERGE_TEXT, the message of one merge, after
+# parse_title on its subject and note_parse on its note (NOTE_ERR says there is none).
+# FORM top is two lines; reply (a line in the daily thread) and compact (the same line at
+# the top, prefixed 🧰) hold an internal or test merge, and fall back to top without a note.
+merge_render() {
+	local sha=$1 pr=$2 visual=$3 migs=$4 form=$5
+	local icon sicon sword repo task="" area aud first second link stg rest m
+	case $STAGING in
+	success) icon=🟢 sicon=✅ sword=deployed ;;
+	failure) icon=🟥 sicon=🟥 sword="not updated" ;;
+	held) icon=🟨 sicon=🟨 sword=held ;;
+	esac
+	repo=${REPO##*/}
+	repo=${repo#dxb-}
 	task=$(printf '%s\n' "$P_DISPLAY" | grep -Eo 'T-[0-9]+' | sed -n 1p || true)
 	[ -n "$task" ] || task=$(git log -1 --format=%b "$sha" | grep -Eo 'T-[0-9]+' | sed -n 1p || true)
-	s="🔀 $s"
-	[ -z "$task" ] || s="$s — $task"
-	s="$s · \`$(git rev-parse --short=7 "$sha")\`"
+	if [ -n "$pr" ]; then link="<$REPO_URL/pull/$pr|#$pr>"; else link="\`$(git rev-parse --short=7 "$sha")\`"; fi
+	if [ "$form" != top ] && [ -z "$NOTE_ERR" ]; then
+		first="$NOTE_AUDIENCE · $repo $link"
+		[ -z "$task" ] || first="$first · $task"
+		first="$first — $(mrkdwn_escape "$NOTE_TEXT")"
+		[ -z "$NOTE_ASKED" ] || first="$first (asked by $(mrkdwn_escape "$NOTE_ASKED"))"
+		stg="staging $sicon"
+		[ "$STAGING" = success ] || stg="$stg $sword"
+		if [ -n "$RUN_URL" ]; then stg="<$RUN_URL|$stg>"; fi
+		first="$first · $stg"
+		[ "$P_VISUAL" != 1 ] || first="$first ⚠ visual review missing"
+		if [ "$form" = compact ]; then first="🧰 $first"; fi
+		MERGE_TEXT=$first
+		return 0
+	fi
+	area=$(area_of "$P_SCOPE")
+	first=$icon
+	[ -z "$area" ] || first="$first *$(mrkdwn_escape "$area")*"
+	if [ -z "$NOTE_ERR" ]; then
+		case $NOTE_AUDIENCE in users) aud="for users" ;; *) aud=$NOTE_AUDIENCE ;; esac
+		first="$first · $aud — $(mrkdwn_escape "$NOTE_TEXT")"
+	else
+		first="$first — $(mrkdwn_escape "$P_DISPLAY" | tr '|' '¦') (no release note)"
+	fi
+	[ "$P_VISUAL" != 1 ] || first="$first ⚠ visual review missing"
+	second="$repo $link"
+	[ -z "$task" ] || second="$second · $task"
+	[ -z "$NOTE_ASKED" ] || second="$second · asked by $(mrkdwn_escape "$NOTE_ASKED")"
+	if [ -n "$RUN_URL" ]; then stg="<$RUN_URL|$sword>"; else stg=$sword; fi
+	second="$second · staging $sicon $stg · $(next_release_text "$sha")"
 	if [ -n "$migs" ]; then
 		rest=$migs
 		m=""
@@ -592,45 +806,103 @@ slack_merge_text() {
 			m="$m, \`${rest%%,*}\`"
 			case $rest in *,*) rest=${rest#*,} ;; *) rest="" ;; esac
 		done
-		case $migs in *,*) s="$s · migrations ${m#, }" ;; *) s="$s · migration ${m#, }" ;; esac
+		case $migs in *,*) second="$second · migrations ${m#, }" ;; *) second="$second · migration ${m#, }" ;; esac
 	fi
-	[ "$visual" != 1 ] || s="$s · 🖼 screenshots"
-	printf '%s\n' "$s"
+	[ "$visual" != 1 ] || second="$second · 🖼 screenshots in thread"
+	MERGE_TEXT=$(printf '%s\n%s' "$first" "$second")
 }
 
-# slack_post text: sets SLACK_TS SLACK_PERMALINK SLACK_ERROR. The token goes to
-# curl on stdin, never on its command line and never to the log.
-slack_post() {
-	# SLACK_POST_CHANNEL, when set (even empty), replaces the releases channel: post-merge
-	# must never fall back to it, which is another channel once #releases is renamed.
-	local api=${SLACK_API_URL:-https://slack.com/api} channel=${SLACK_POST_CHANNEL-${SLACK_RELEASES_CHANNEL:-}} resp
-	SLACK_TS="" SLACK_PERMALINK="" SLACK_ERROR=""
+# slack_channel_id: SLACK_POST_CHANNEL, when set (even empty), replaces the releases
+# channel: post-merge must never fall back to it, which is another channel once
+# #releases is renamed.
+slack_channel_id() { printf '%s' "${SLACK_POST_CHANNEL-${SLACK_RELEASES_CHANNEL:-}}"; }
+
+# slack_ready: resets SLACK_*; status 1 and SLACK_ERROR when there is nothing to post with
+slack_ready() {
+	SLACK_TS="" SLACK_PERMALINK="" SLACK_ERROR="" SLACK_CHANNEL=""
 	if [ -z "${SLACK_RELEASES_BOT_TOKEN:-}" ]; then
 		SLACK_ERROR="no token"
 		return 1
 	fi
-	if [ -z "$channel" ]; then
+	if [ -z "$(slack_channel_id)" ]; then
 		SLACK_ERROR="no channel"
 		return 1
 	fi
-	jq -n --arg c "$channel" --arg t "$1" \
-		'{channel: $c, text: $t, mrkdwn: true, unfurl_links: false, unfurl_media: false}' >"$WORK/slack.json"
-	if ! resp=$(slack_curl --data-binary "@$WORK/slack.json" -H 'Content-Type: application/json; charset=utf-8' \
-		"$api/chat.postMessage"); then
+	return 0
+}
+
+# slack_check: SLACK_RESP says ok, else SLACK_ERROR is Slack's error
+slack_check() {
+	if [ "$(jq -r '.ok // false' <<<"$SLACK_RESP" 2>/dev/null)" != true ]; then
+		SLACK_ERROR=$(jq -r '.error // "unreadable response"' <<<"$SLACK_RESP" 2>/dev/null || echo "unreadable response")
+		return 1
+	fi
+	return 0
+}
+
+# slack_call METHOD FILE: POST the JSON file; the answer is in SLACK_RESP
+slack_call() {
+	local api=${SLACK_API_URL:-https://slack.com/api}
+	if ! SLACK_RESP=$(slack_curl --data-binary "@$2" -H 'Content-Type: application/json; charset=utf-8' "$api/$1"); then
 		SLACK_ERROR="request failed"
 		return 1
 	fi
-	if [ "$(jq -r '.ok // false' <<<"$resp" 2>/dev/null)" != true ]; then
-		SLACK_ERROR=$(jq -r '.error // "unreadable response"' <<<"$resp" 2>/dev/null || echo "unreadable response")
-		return 1
-	fi
-	SLACK_TS=$(jq -r '.ts // ""' <<<"$resp")
-	channel=$(jq -r --arg c "$channel" '.channel // $c' <<<"$resp")
-	resp=$(slack_curl -G --data-urlencode "channel=$channel" --data-urlencode "message_ts=$SLACK_TS" \
+	slack_check
+}
+
+# slack_link CHANNEL TS: sets SLACK_PERMALINK
+slack_link() {
+	local api=${SLACK_API_URL:-https://slack.com/api} resp
+	resp=$(slack_curl -G --data-urlencode "channel=$1" --data-urlencode "message_ts=$2" \
 		"$api/chat.getPermalink" || true)
 	SLACK_PERMALINK=$(jq -r '.permalink // ""' <<<"$resp" 2>/dev/null || true)
-	[ -n "$SLACK_PERMALINK" ] || SLACK_PERMALINK="https://slack.com/archives/$channel/p$(printf '%s' "$SLACK_TS" | tr -d .)"
+	[ -n "$SLACK_PERMALINK" ] || SLACK_PERMALINK="https://slack.com/archives/$1/p$(printf '%s' "$2" | tr -d .)"
+}
+
+# slack_post TEXT [THREAD_TS]: sets SLACK_TS SLACK_CHANNEL SLACK_PERMALINK SLACK_ERROR. The
+# token goes to curl on stdin, never on its command line and never to the log.
+slack_post() {
+	local channel
+	slack_ready || return 1
+	channel=$(slack_channel_id)
+	jq -n --arg c "$channel" --arg t "$1" --arg th "${2:-}" \
+		'{channel: $c, text: $t, mrkdwn: true, unfurl_links: false, unfurl_media: false}
+		 + (if $th != "" then {thread_ts: $th} else {} end)' >"$WORK/slack.json"
+	slack_call chat.postMessage "$WORK/slack.json" || return 1
+	SLACK_TS=$(jq -r '.ts // ""' <<<"$SLACK_RESP")
+	SLACK_CHANNEL=$(jq -r --arg c "$channel" '.channel // $c' <<<"$SLACK_RESP")
+	slack_link "$SLACK_CHANNEL" "$SLACK_TS"
 	return 0
+}
+
+# slack_update TS TEXT [CHANNEL]: chat.update of a message this tool posted
+slack_update() {
+	local channel
+	slack_ready || return 1
+	channel=${3:-$(slack_channel_id)}
+	jq -n --arg c "$channel" --arg ts "$1" --arg t "$2" '{channel: $c, ts: $ts, text: $t}' >"$WORK/slack.json"
+	slack_call chat.update "$WORK/slack.json" || return 1
+	SLACK_TS=$1
+	SLACK_CHANNEL=$channel
+	slack_link "$channel" "$1"
+	return 0
+}
+
+# slack_find_parent LINE: SLACK_TS is the oldest message of a bot in the channel's recent
+# history whose first line is LINE. Status 0 found, 1 none, 2 the history cannot be read
+# (the bot lacks channels:history, or is not in the channel).
+slack_find_parent() {
+	local api=${SLACK_API_URL:-https://slack.com/api}
+	slack_ready || return 2
+	if ! SLACK_RESP=$(slack_curl -G --data-urlencode "channel=$(slack_channel_id)" --data-urlencode "limit=200" \
+		"$api/conversations.history"); then
+		SLACK_ERROR="request failed"
+		return 2
+	fi
+	slack_check || return 2
+	SLACK_TS=$(jq -r --arg l "$1" '[.messages[]? | select((.bot_id // "") != "")
+		| select(((.text // "") | split("\n")[0]) == $l) | .ts] | min // ""' <<<"$SLACK_RESP")
+	[ -n "$SLACK_TS" ]
 }
 
 slack_curl() {
@@ -1148,13 +1420,18 @@ merge_migrations() {
 	printf '%s' "${out#,}"
 }
 
+# before_usable HEAD: --before is a commit this checkout has, and an ancestor of HEAD
+before_usable() {
+	[ -n "$BEFORE" ] && ! printf '%s' "$BEFORE" | grep -Eq '^0+$' &&
+		git cat-file -e "$BEFORE^{commit}" 2>/dev/null &&
+		git merge-base --is-ancestor "$BEFORE" "$1" 2>/dev/null
+}
+
 # the merges to post, oldest first: --before..sha when the push's previous head is
 # known here, else sha alone
 merge_commits() {
 	local head=$1
-	if [ -n "$BEFORE" ] && ! printf '%s' "$BEFORE" | grep -Eq '^0+$' &&
-		git cat-file -e "$BEFORE^{commit}" 2>/dev/null &&
-		git merge-base --is-ancestor "$BEFORE" "$head" 2>/dev/null; then
+	if before_usable "$head"; then
 		git log --first-parent --reverse -n 20 --format=%H "$BEFORE..$head" -- >"$WORK/merge.list"
 		if [ -s "$WORK/merge.list" ]; then
 			cat "$WORK/merge.list"
@@ -1164,65 +1441,153 @@ merge_commits() {
 	git rev-parse "$head"
 }
 
-# merge_already_posted pr sha: a re-run of the workflow must not post twice
-merge_already_posted() {
+# merge_handle PR SHA: the merge's handle, the last comment this tool wrote for SHA on
+# the PR. Sets H_TS H_CHANNEL H_STATE H_FORM. Status 0 found, 1 none, 2 gh cannot say.
+# A comment written before the state and the form were recorded reads as top and success.
+merge_handle() {
+	local line
+	H_TS="" H_CHANNEL="" H_STATE="" H_FORM=""
 	[ "$NO_GH" = 0 ] || return 1
 	if ! gh pr view "$1" --repo "$REPO" --json comments >"$WORK/comments-$1.json" 2>"$WORK/gh.err" </dev/null; then
 		warn "gh pr view $1: $(sed -n 1p "$WORK/gh.err"); cannot tell whether this merge was posted"
-		return 1
+		return 2
 	fi
-	jq -e --arg m "release-tools merge-post: sha=$2 " '[.comments[]? | (.body // "") | contains($m)] | any' \
-		"$WORK/comments-$1.json" >/dev/null
+	jq -r --arg m "release-tools merge-post: sha=$2 " \
+		'[.comments[]? | (.body // "") | select(contains($m))] | last // ""' "$WORK/comments-$1.json" >"$WORK/handle.body"
+	line=$(grep -o '<!-- release-tools merge-post:[^>]*-->' "$WORK/handle.body" | tail -1 || true)
+	H_TS=$(sed -nE 's/.* ts=([^ ]*).*/\1/p' <<<"$line")
+	[ -n "$H_TS" ] || return 1
+	H_CHANNEL=$(sed -nE 's/.* channel=([^ ]*).*/\1/p' <<<"$line")
+	H_STATE=$(sed -nE 's/.* state=([^ ]*).*/\1/p' <<<"$line")
+	H_FORM=$(sed -nE 's/.* form=([^ ]*).*/\1/p' <<<"$line")
+	[ -n "$H_STATE" ] || H_STATE=success
+	[ -n "$H_FORM" ] || H_FORM=top
+	return 0
 }
 
-# merge_record pr sha: the ts goes on the PR, where the PM finds it to thread the screenshots
+# merge_record PR SHA FORM: the handle goes on the PR, where the PM finds the ts to
+# thread the screenshots and where the next run finds the message to edit
 merge_record() {
-	printf 'Posted to the merge channel: %s\n\n<!-- release-tools merge-post: sha=%s ts=%s -->\n' \
-		"$SLACK_PERMALINK" "$(git rev-parse "$2")" "$SLACK_TS" >"$WORK/record.md"
+	printf 'Posted to the merge channel: %s\n\n<!-- release-tools merge-post: sha=%s ts=%s channel=%s state=%s form=%s -->\n' \
+		"$SLACK_PERMALINK" "$(git rev-parse "$2")" "$SLACK_TS" "$SLACK_CHANNEL" "$STAGING" "$3" >"$WORK/record.md"
 	gh pr comment "$1" --repo "$REPO" --body-file "$WORK/record.md" >/dev/null </dev/null ||
 		warn "could not record the post's ts on PR #$1 (the job needs pull-requests: write)"
 }
 
+# merge_send TEXT FORM: post a new merge message. A reply goes in the thread of today's
+# parent, which the first such merge of the UTC day creates; with no readable history
+# (no channels:history) it goes to the top as a compact line. Sets MERGE_FORM.
+merge_send() {
+	local form=$2 text=$1 parent rc=0 thread=""
+	if [ "$form" = reply ]; then
+		parent="🧰 Internal and test changes, $(fmt_epoch "$(epoch_of "${TODAY}T00:00:00Z")" '%a %d %b') (UTC)"
+		slack_find_parent "$parent" || rc=$?
+		case $rc in
+		0) thread=$SLACK_TS ;;
+		1) if slack_post "$parent"; then thread=$SLACK_TS; else warn "daily thread not created: $SLACK_ERROR"; fi ;;
+		*) warn "no daily thread for internal and test merges ($SLACK_ERROR): posting them as compact lines" ;;
+		esac
+		if [ -z "$thread" ]; then
+			form=compact
+			text="🧰 $text"
+		fi
+	fi
+	MERGE_FORM=$form
+	slack_post "$text" "$thread"
+}
+
+POSTED=0 UPDATED=0 FAILED=0
+
+# handle_merge SHA MODE: post, or edit, the message of one merge. MODE new: a merge of
+# this push; catchup: an earlier merge, edited only when its message still says staging
+# lacks it. Status 2 (catchup) when gh cannot say, so the caller stops asking.
+handle_merge() {
+	local sha=$1 mode=$2 subject pr visual=0 migs form short hrc=1
+	subject=$(git log -1 --format=%s "$sha")
+	case $subject in "chore(release):"*) return 0 ;; esac
+	parse_title "$subject"
+	pr=$P_PR
+	short=$(git rev-parse --short=7 "$sha")
+	H_TS="" H_STATE="" H_FORM="" H_CHANNEL=""
+	if [ -n "$pr" ] && [ "$DRY_RUN" = 0 ]; then merge_handle "$pr" "$sha" || hrc=$?; fi
+	if [ -n "$H_TS" ]; then
+		# a message that says "staging has it" (or "in prod") stays; red and held are edited
+		if [ "$H_STATE" = "$STAGING" ] || { [ "$H_STATE" != failure ] && [ "$H_STATE" != held ]; }; then
+			if [ "$mode" = new ]; then log "$short (#$pr) was already posted"; fi
+			return 0
+		fi
+	elif [ "$mode" = catchup ]; then
+		[ "$hrc" != 2 ] || return 2
+		return 0
+	fi
+	if [ -n "$pr" ]; then
+		pr_fetch "$pr"
+		if pr_has_label "$pr" release:visual; then visual=1; fi
+		pr_release_note "$pr" >"$WORK/note.txt"
+		note_parse "$WORK/note.txt" "$subject" || true
+	else
+		note_parse /dev/null "$subject" || true
+	fi
+	migs=$(merge_migrations "$sha")
+	if [ -n "$H_TS" ]; then
+		form=$H_FORM
+	elif [ -z "$NOTE_ERR" ] && [ "$NOTE_AUDIENCE" != users ] && [ -z "$migs" ] && [ "$visual" != 1 ]; then
+		form=reply
+	else
+		form=top
+	fi
+	merge_render "$sha" "$pr" "$visual" "$migs" "$form"
+	if [ "$DRY_RUN" = 1 ]; then
+		if [ "$form" = reply ]; then printf '== Slack (daily thread) ==\n%s\n' "$MERGE_TEXT"; else printf '== Slack ==\n%s\n' "$MERGE_TEXT"; fi
+		return 0
+	fi
+	if [ -n "$H_TS" ]; then
+		if slack_update "$H_TS" "$MERGE_TEXT" "$H_CHANNEL"; then
+			UPDATED=$((UPDATED + 1))
+			log "updated $short (#$pr) to staging $STAGING (ts $H_TS)"
+			write_output slack_ts "$SLACK_TS"
+			summary "Merge post updated: $SLACK_PERMALINK"
+			merge_record "$pr" "$sha" "$H_FORM"
+		else
+			FAILED=$((FAILED + 1))
+			warn "merge $short not updated: $SLACK_ERROR"
+		fi
+	elif merge_send "$MERGE_TEXT" "$form"; then
+		POSTED=$((POSTED + 1))
+		log "posted $short to Slack (ts $SLACK_TS)"
+		write_output slack_ts "$SLACK_TS"
+		summary "Merge post: $SLACK_PERMALINK"
+		if [ -n "$pr" ]; then merge_record "$pr" "$sha" "$MERGE_FORM"; fi
+	else
+		FAILED=$((FAILED + 1))
+		warn "merge $short not posted: $SLACK_ERROR"
+	fi
+	return 0
+}
+
 cmd_post_merge() {
 	init_context
-	[ "$NPOS" = 0 ] || die "usage: release.sh post-merge [--sha SHA] [--before SHA] [--migrations PATH]..."
-	local head sha subject pr migs visual posted=0 failed=0 text
+	[ "$NPOS" = 0 ] || die "usage: release.sh post-merge [--sha SHA] [--before SHA] [--migrations PATH]... [--staging success|failure|held]"
+	local head sha rc
 	head=$(git rev-parse --verify -q "${SHA:-HEAD}^{commit}") || die "unknown commit ${SHA:-HEAD}"
 	SLACK_POST_CHANNEL=${SLACK_MERGES_CHANNEL:-}
 	merge_commits "$head" >"$WORK/merges"
 	while read -r sha <&3; do
-		subject=$(git log -1 --format=%s "$sha")
-		case $subject in "chore(release):"*) continue ;; esac
-		parse_title "$subject"
-		pr=$P_PR
-		visual=0
-		if [ -n "$pr" ]; then
-			pr_fetch "$pr"
-			if pr_has_label "$pr" release:visual; then visual=1; fi
-		fi
-		migs=$(merge_migrations "$sha")
-		text=$(slack_merge_text "$sha" "$pr" "$visual" "$migs")
-		if [ "$DRY_RUN" = 1 ]; then
-			printf '== Slack ==\n%s\n' "$text"
-			continue
-		fi
-		if [ -n "$pr" ] && merge_already_posted "$pr" "$sha"; then
-			log "$(git rev-parse --short=7 "$sha") (#$pr) was already posted"
-			continue
-		fi
-		if slack_post "$text"; then
-			posted=$((posted + 1))
-			log "posted $(git rev-parse --short=7 "$sha") to Slack (ts $SLACK_TS)"
-			write_output slack_ts "$SLACK_TS"
-			summary "Merge post: $SLACK_PERMALINK"
-			if [ -n "$pr" ]; then merge_record "$pr" "$sha"; fi
-		else
-			failed=$((failed + 1))
-			warn "merge $(git rev-parse --short=7 "$sha") not posted: $SLACK_ERROR"
-		fi
+		handle_merge "$sha" new || true
 	done 3<"$WORK/merges"
-	write_output posted "$posted"
-	if [ "$failed" -gt 0 ]; then summary "Merge post failed for $failed merge(s)"; fi
+	# the push that follows a red or held deploy carries the merges it did not deploy: the
+	# last ten merges before this push are looked at, and edited to 🟢 when this deploy is
+	if [ "$STAGING" = success ] && [ "$DRY_RUN" = 0 ] && before_usable "$head"; then
+		git log --first-parent -n 10 --format=%H "$BEFORE" -- >"$WORK/earlier"
+		while read -r sha <&3; do
+			rc=0
+			handle_merge "$sha" catchup || rc=$?
+			[ "$rc" != 2 ] || break
+		done 3<"$WORK/earlier"
+	fi
+	write_output posted "$POSTED"
+	write_output updated "$UPDATED"
+	if [ "$FAILED" -gt 0 ]; then summary "Merge post failed for $FAILED merge(s)"; fi
 	return 0
 }
 
@@ -1266,6 +1631,13 @@ cmd_check_title() {
 		type=${BASH_REMATCH[2]}
 		case $KNOWN_TYPES in *" $type "*)
 			echo "ok: $t"
+			parse_title "$t"
+			if [ -n "$P_SCOPE" ] && [ -z "$(area_map "$P_SCOPE")" ]; then
+				# a warning, not a failure: the merge post shows the scope as it is
+				local w="the scope \"$P_SCOPE\" is not in the area map of the merge post: add it to area_map in release-tools' release.sh"
+				echo "warning: $w" >&2
+				[ "${GITHUB_ACTIONS:-}" != true ] || echo "::warning::$w"
+			fi
 			return 0
 			;;
 		esac
@@ -1274,6 +1646,31 @@ cmd_check_title() {
 		echo "PR title does not read 'type(scope)!: subject' (scope and ! optional): $t" >&2
 	fi
 	echo "the PR title becomes the squash title, the version bump and the release note" >&2
+	return 1
+}
+
+# check-note ['<PR title>']: the PR body on stdin must hold a valid "## Release note"
+cmd_check_note() {
+	[ "$NPOS" -le 1 ] || die "usage: release.sh check-note ['<PR title>'] < body"
+	WORK=$(mktemp -d "${TMPDIR:-/tmp}/release-tools.XXXXXX")
+	trap cleanup EXIT
+	tr -d '\r' >"$WORK/body"
+	note_section_of "$WORK/body" >"$WORK/note"
+	if note_parse "$WORK/note" "$POS1"; then
+		echo "ok: $NOTE_AUDIENCE: $NOTE_TEXT${NOTE_ASKED:+ (asked by $NOTE_ASKED)}"
+		return 0
+	fi
+	[ "${GITHUB_ACTIONS:-}" != true ] || echo "::error title=Release note::$NOTE_ERR"
+	{
+		echo "Release note check failed: $NOTE_ERR"
+		echo "The \"## Release note\" section I read:"
+		if [ -s "$WORK/note" ]; then sed 's/^/    | /' "$WORK/note"; else echo "    (empty, or no such section)"; fi
+		echo "It reads one line, for Stas, Leon or Max:"
+		echo "    ## Release note"
+		echo "    users: Brokers see a Call log tab in Contacts, with missed calls and voicemails."
+		echo "(users: a broker or client sees it; internal: the team sees it; tests: tests or tooling only.)"
+		echo "Optional second line: asked-by: <name>. Edit the PR body: the check runs again."
+	} >&2
 	return 1
 }
 
@@ -1293,6 +1690,7 @@ main() {
 	post-merge) cmd_post_merge ;;
 	backfill-ext) cmd_backfill_ext ;;
 	check-title) cmd_check_title ;;
+	check-note) cmd_check_note ;;
 	-h | --help | help) usage ;;
 	*) die "unknown subcommand $cmd (see --help)" ;;
 	esac

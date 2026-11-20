@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # A stand-in for curl talking to Slack. Each call leaves args.N (its argv),
 # stdin.N (what came on stdin: the config carrying the token) and data.N (the
-# --data-binary file) under $CURL_LOG.
+# --data-binary file) under $CURL_LOG. chat.postMessage answers with a ts that
+# grows by one per post (the first is 1730000000.000100) and remembers the
+# top-level posts as the bot's own, for conversations.history to return;
+# SLACK_HISTORY_ERROR makes the history answer with that Slack error.
 set -eu
 n=$(($(find "$CURL_LOG" -name 'args.*' | wc -l) + 1))
 printf '%s\n' "$@" >"$CURL_LOG/args.$n"
@@ -22,7 +25,23 @@ case $url in
 	if [ -n "${SLACK_POST_RESPONSE:-}" ]; then
 		printf '%s\n' "$SLACK_POST_RESPONSE"
 	else
-		echo '{"ok":true,"channel":"C0TEST","ts":"1730000000.000100"}'
+		k=$(($(find "$CURL_LOG" -name 'post.*' | wc -l) + 1))
+		: >"$CURL_LOG/post.$k"
+		ts=$(printf '1730000000.%06d' $((99 + k)))
+		jq -c --arg ts "$ts" 'select((.thread_ts // "") == "") | {text, ts: $ts, bot_id: "B0BOT"}' \
+			"$CURL_LOG/data.$n" >>"$CURL_LOG/messages.jsonl"
+		printf '{"ok":true,"channel":"C0TEST","ts":"%s"}\n' "$ts"
+	fi
+	;;
+*chat.update)
+	jq -c '{ok: true, channel, ts}' "$CURL_LOG/data.$n"
+	;;
+*conversations.history)
+	if [ -n "${SLACK_HISTORY_ERROR:-}" ]; then
+		printf '{"ok":false,"error":"%s"}\n' "$SLACK_HISTORY_ERROR"
+	else
+		touch "$CURL_LOG/messages.jsonl"
+		jq -sc '{ok: true, messages: reverse}' "$CURL_LOG/messages.jsonl"
 	fi
 	;;
 *chat.getPermalink)
