@@ -93,6 +93,34 @@ per repository:
 gh label create release:visual -c 7057ff -d "Screenshots go in the #releases thread" -R OWNER/REPO
 ```
 
+**The merge posts are marked in prod.** After the Slack post, kinds `deploy` and `hotfix` edit, in place, the
+merge post (see [the merge post](#the-merge-post-a-repository-that-deploys-staging-on-merge)) of every PR in
+the range, so the merge channel reads as a board of where each merge is now:
+
+```
+✅ *Contacts* · for users — Brokers see a Call log tab in Contacts, with missed calls and voicemails (CRM look, staging only)
+frontend <PR link|#786> · T-1698 · asked by Leon · staging ✅ <run|deployed> · prod ✅ v1.62.0, Sat 21 Nov 04:22Z
+```
+
+- **The prod field** is `prod ✅ vX.Y.Z, <day> <time>Z` for a release (the cut's own time, UTC) and
+  `prod 🩹 vX.Y.Z` for a hotfix. The icon is ✅ either way. The staging field keeps what staging did: a merge
+  that went to prod after a red staging deploy reads `staging 🟥 not updated · prod ✅ …`. An internal or
+  tests merge keeps its form (a reply in the daily thread) and the line ends with the same prod field.
+- **Which posts:** the PRs of the commits in the cut's range (a hotfix: the commits of the hotfix branch,
+  each found through its `(cherry picked from commit …)` trailer, because the post belongs to the commit on
+  the default branch). A commit with no `(#N)`, or a PR with no merge post (its handle comment), is skipped.
+- **Written again from its sources,** not patched: the title, the PR's note and `release:visual` label as
+  they are now, and the migrations, which is why the `migrations` input must be given the value `post-merge`
+  got. The staging run's link comes from the handle (`run=`); a handle written before it has none, and the
+  post then shows `deployed` with no link.
+- **Once only.** The edit is recorded as a new handle comment with `state=prod`; a post that says prod is
+  never edited again, so the daily release after a hotfix leaves the fix's post at `prod 🩹 vX.Y.Z`. A
+  re-deploy (no new release) marks nothing. A run that finishes a release a crash left half-done marks too.
+- **Best effort,** after the deploy, the tag and the post, and before the CHANGELOG commit: no Slack token,
+  Slack refusing an edit, or `gh` unable to read a PR's comments is a warning, never a failed cut. A dry run
+  edits nothing. Kinds `store` and `apply` mark nothing. The job needs `pull-requests: write` to record the
+  edit; without it the post is still edited, and the next cut would edit it once more.
+
 **The post is best effort.** When Slack refuses or cannot be reached, or the token is missing, the
 release still stands, the step still exits 0, and the Release says `Slack: not posted (<error>)`. To
 post it again by hand, from a checkout of the repository:
@@ -134,7 +162,9 @@ The checkout must be full (`fetch-depth: 0`), and its token must be allowed to p
 release commit (`permissions: contents: write`; `actions/checkout` keeps the credentials by default).
 It also needs `pull-requests: read`, because it reads each PR's labels and `## Release note` with
 `gh pr view`. Without it, a private repository's release is still cut, with a warning, but without
-the release notes and the `release:visual` line.
+the release notes and the `release:visual` line. A repository that runs `post-merge` also gives the cut
+`pull-requests: write` and the same `migrations` value, so [the merge posts it marks in
+prod](#a-service-deployed-by-cd-kind-deploy) are recorded and keep their migration field.
 A push made with `GITHUB_TOKEN` starts no workflow, and `[skip ci]` is a second guard, so the release
 commit cannot trigger the deploy again.
 
@@ -150,7 +180,7 @@ The `release` job comes after the job that deploys and smoke-tests prod:
     runs-on: ubuntu-latest
     permissions:
       contents: write                # the tag, the Release, the CHANGELOG commit
-      pull-requests: read            # the labels and the release notes
+      pull-requests: write           # the labels and the release notes; records the merge posts it marks
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
@@ -161,6 +191,7 @@ The `release` job comes after the job that deploys and smoke-tests prod:
           kind: deploy
           version_file: pyproject.toml          # or package.json; "package.json package-lock.json"
           version: ${{ inputs.version }}        # a workflow_dispatch input, for 1.0.0; empty otherwise
+          migrations: alembic/versions          # what post-merge got; empty for none
           slack_token: ${{ secrets.SLACK_RELEASES_BOT_TOKEN }}
           slack_channel: ${{ vars.SLACK_RELEASES_CHANNEL }}
 ```
@@ -341,10 +372,12 @@ and a re-run with the same state posts and edits nothing.
 ```
 Posted to the merge channel: <permalink>
 
-<!-- release-tools merge-post: sha=<full sha> ts=1730000000.000100 channel=C0… state=success form=top -->
+<!-- release-tools merge-post: sha=<full sha> ts=1730000000.000100 channel=C0… state=success form=top run=<staging run link> -->
 ```
 
-`state` is `success`, `failure` or `held`; `form` is `top`, `reply` (in the daily thread) or `compact`. The
+`state` is `success`, `failure` or `held` (what staging did), or `prod` (the release's cut marked the post:
+`stg=` then keeps what staging did, and `tag=` is the release); `form` is `top`, `reply` (in the daily thread)
+or `compact`; `run` is the staging run's link (left out when there is none). The
 last such comment for a sha is the handle: a state change writes a new one. A comment with no `state` or
 `form` (an earlier version's) reads as `success` and `top`. To thread the screenshots:
 
@@ -485,7 +518,7 @@ today, someone edited a PR body or label after the cut: that is worth reporting,
 
 ```
 release.sh cut             [--kind deploy|store|apply|hotfix] [--sha SHA] [--version X.Y.Z]
-                           [--version-file PATH]... [--name NAME] [--dry-run]
+                           [--version-file PATH]... [--name NAME] [--migrations PATH]... [--dry-run]
                            [--base vX.Y.Z --reason TEXT [--by TEXT] [--suite TEXT]]   (kind hotfix)
 release.sh render          FROM TO          (FROM '' : from the retro marker or the root)
 release.sh render-history  [--through REF] [--heading TEXT] [--write]

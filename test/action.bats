@@ -12,7 +12,7 @@ setup() {
 	export GITHUB_ACTION_PATH="$BATS_TEST_DIRNAME/../cut"
 	export IN_KIND=deploy IN_SHA="" IN_SHA_GIVEN="" IN_VERSION="" IN_VERSION_FILE="" IN_NAME="" IN_BRANCH=""
 	export IN_CHANGELOG=CHANGELOG.md IN_DRY_RUN=false IN_BACKFILL=false IN_BUMP_FILE=manifest.config.ts IN_RETRO_NOTE=""
-	export IN_BASE="" IN_REASON="" IN_BY="" IN_SUITE=""
+	export IN_BASE="" IN_REASON="" IN_BY="" IN_SUITE="" IN_MIGRATIONS=""
 }
 
 @test "deploy: the sha, two version files, a name" {
@@ -65,4 +65,23 @@ setup() {
 	[ "$status" -eq 0 ]
 	[ "$(output tag)" = v0.1.1 ]
 	[[ "$(slack_text 2)" == *$'reason: the thread \xc2\xb7 by the PM\nsuite: affected areas green' ]] || false
+}
+
+@test "migrations reach the cut, so an edited merge post keeps its migration field" {
+	mkdir -p alembic/versions
+	printf 'revision = "0161_x"\n' >alembic/versions/0161_x.py
+	git add alembic
+	land "feat(calls): the call log (T-7) (#7)"
+	export SLACK_MERGES_CHANNEL=C0MERGES
+	run "$RELEASE" post-merge --migrations alembic/versions
+	IN_SHA=$(git rev-parse HEAD) IN_MIGRATIONS="alembic/versions" run bash "$FX/step.sh"
+	[ "$status" -eq 0 ]
+	[ "$(slack_method_of_last)" = "https://slack.com/api/chat.update" ]
+	[[ "$(slack_text "$(slack_posts)")" == *"migration \`0161_x\`"* ]] || false
+}
+
+slack_method_of_last() {
+	local f
+	f=$(find "$CURL_LOG" -name 'data.*' | sed 's/.*\.//' | sort -n | tail -1)
+	tail -1 "$CURL_LOG/args.$f"
 }

@@ -223,7 +223,7 @@ CALL_LOG_NOTE="users: Brokers see a Call log tab in Contacts, with missed calls 
 	[ "$(slack_json 1 | jq -r '.thread_ts // ""')" = "" ]
 	[ "$(slack_text 2)" = "tests · widget <https://github.com/acme/widget/pull/914|#914> · T-1650 — The calls area's tests were cut from 2,448 to 1,232. · <https://github.com/acme/widget/actions/runs/111|staging ✅>" ]
 	[ "$(slack_json 2 | jq -r .thread_ts)" = 1730000000.000100 ]
-	grep -q 'ts=1730000000.000101 channel=C0TEST state=success form=reply -->' "$GH_STATE"/comment-914-0
+	grep -q 'ts=1730000000.000101 channel=C0TEST state=success form=reply run=https://github.com/acme/widget/actions/runs/111 -->' "$GH_STATE"/comment-914-0
 
 	# the second one finds today's parent and only replies
 	land "chore(ci): cache the install (T-1651) (#915)"

@@ -119,7 +119,7 @@ posted_channel() {
 	[ "$(slack_posts)" = 1 ]
 	[ "$(output slack_ts)" = 1730000000.000100 ]
 	[ "$(output posted)" = 1 ]
-	grep -q "release-tools merge-post: sha=$(git rev-parse HEAD) ts=1730000000.000100 channel=C0TEST state=success form=top -->" "$GH_STATE"/comment-9-0
+	grep -q "release-tools merge-post: sha=$(git rev-parse HEAD) ts=1730000000.000100 channel=C0TEST state=success form=top run=https://github.com/acme/widget/actions/runs/111 -->" "$GH_STATE"/comment-9-0
 	grep -q 'https://acme.slack.com/archives/C0TEST/p1730000000000100' "$GH_STATE"/comment-9-0
 
 	run "$RELEASE" post-merge
