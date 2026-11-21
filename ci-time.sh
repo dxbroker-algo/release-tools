@@ -14,28 +14,23 @@
 # (every job that is has completed), and the wall it shortened silently is reported with the
 # job's name on a ⚠ line.
 #
-# The gate: card H (at T-1576's close) turns the verdict into a gate. With the gate on
-# (CI_TIME_FAIL_ON_OVER=true, or --fail-on-over) a wall over the limit exits 1 and fails the
-# run; with it off the script prints its table and its ⚠ line and exits 0, whatever it reads.
-# The gate never fails a run it could not judge: a wall that was not read is reported, not
-# failed.
+# REPORT-ONLY: it prints its table and its ⚠ line and exits 0, whatever it reads. Card H (at
+# T-1576's close) turns the verdict into a gate.
 #
 # Needs bash 3.2+, jq and curl. Usage:
 #
-#   ci-time.sh [--jobs FILE] [--limit MINUTES] [--fail-on-over]
+#   ci-time.sh [--jobs FILE] [--limit MINUTES]
 #
 # The environment (set by the workflow):
 #   GITHUB_TOKEN            the workflow's token (actions: read)
 #   GITHUB_REPOSITORY       owner/repo
 #   GITHUB_RUN_ID           the run to read
 #   CI_TIME_LIMIT_MINUTES   the limit: 5 for a CI run, 20 for a prod CD run
-#   CI_TIME_FAIL_ON_OVER    true to fail the run when the wall is over the limit (the gate)
 #   GITHUB_STEP_SUMMARY     where the run's page gets the same report
 #   RUNNER_NAME             this job's runner: how it finds itself among the run's jobs
 set -euo pipefail
 
 LIMIT="${CI_TIME_LIMIT_MINUTES:-5}"
-GATE="${CI_TIME_FAIL_ON_OVER:-false}"
 JOBS_FILE=""
 REPOSITORY="${GITHUB_REPOSITORY:-}"
 RUN_ID="${GITHUB_RUN_ID:-}"
@@ -51,12 +46,8 @@ while [ $# -gt 0 ]; do
 		LIMIT="$2"
 		shift 2
 		;;
-	--fail-on-over)
-		GATE=true
-		shift
-		;;
 	-h | --help)
-		sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -68,11 +59,6 @@ done
 
 case "$LIMIT" in
 '' | *[!0-9.]*) printf 'ci-time: error: the limit must be a number of minutes\n' >&2; exit 2 ;;
-esac
-
-case "$GATE" in
-true | false) ;;
-*) printf 'ci-time: error: the gate must be true or false\n' >&2; exit 2 ;;
 esac
 
 SUMMARY_FILE="${GITHUB_STEP_SUMMARY:-}"
@@ -105,13 +91,9 @@ jobs_json() {
 #   instant, so a skip would otherwise count as a zero-length job). A job that is still
 #   queued, and this job itself (still running, so it has no completion yet), are reported
 #   and left out.
-#
-#   It prints JSON: the report's text and the verdict's facts (the wall, and whether it is
-#   over the limit). One computation, so the text and the exit code can never disagree.
 report() {
 	jq -r \
 		--arg limit "$LIMIT" \
-		--arg gate "$GATE" \
 		--arg repo "$REPOSITORY" \
 		--arg run "$RUN_ID" \
 		--arg runner "$RUNNER" \
@@ -174,8 +156,6 @@ report() {
 		| (if $wall != null and $wall > $limit_s then true else false end) as $over
 		| (if $wall == null
 			then "CI time (S-37): no job ran in this run — there is no wall to report."
-			elif $over and $gate == "true"
-			then "❌ CI time (S-37): the run\u0027s wall is \(($wall)|dur) — OVER the \($limit_min) min limit. The gate fails this run."
 			elif $over
 			then "⚠ CI time (S-37): the run\u0027s wall is \(($wall)|dur) — OVER the \($limit_min) min limit. REPORT-ONLY: this run is not failed."
 			else "CI time (S-37): the run\u0027s wall is \(($wall)|dur) — under the \($limit_min) min limit." end) as $verdict
@@ -190,48 +170,36 @@ report() {
 			elif ($late | length) > 0
 			then "⚠ \($late | join(", ")) began, is still waiting, or ended after this job started, so \(if ($late|length) == 1 then "it is" else "they are" end) not in this job\u0027s needs: — add \(if ($late|length) == 1 then "it" else "them" end), or the wall is shortened silently."
 			else "needs: every job that ran is in this job\u0027s needs:." end) as $needs_line
-		| {
-			text: (([
-				"### CI time (S-37) — \($repo) run \($run)",
-				"",
-				"| job | status | start (UTC) | end (UTC) | queue | duration |",
-				"| --- | --- | --- | --- | --- | --- |"
-			] + ($rows | map(row_text)) + ["", $verdict, $queue_line] + (if $needs_line == "" then [] else [$needs_line] end)) | join("\n")),
-			over: $over,
-			wall: $wall
-		}
+		| ([
+			"### CI time (S-37) — \($repo) run \($run)",
+			"",
+			"| job | status | start (UTC) | end (UTC) | queue | duration |",
+			"| --- | --- | --- | --- | --- | --- |"
+		] + ($rows | map(row_text)) + ["", $verdict, $queue_line] + (if $needs_line == "" then [] else [$needs_line] end)) | join("\n")
 		'
 }
 
 # The report goes to the log and to the run's page (the same text).
 write_summary() {
 	[ -n "$SUMMARY_FILE" ] || return 0
-	if [ "$GATE" = "true" ]; then
-		MODE="The gate fails the run when the wall is over the limit."
-	else
-		MODE="REPORT-ONLY — this run is not failed."
-	fi
 	{
 		printf '%s\n\n' "$1"
 		printf 'The wall is from the first job\u0027s start to the last job\u0027s end; the queue before the\n'
-		printf 'first job is excluded. The limit is %s min. %s\n' "$LIMIT" "$MODE"
+		printf 'first job is excluded. The limit is %s min. REPORT-ONLY — this run is not failed.\n' "$LIMIT"
 	} >>"$SUMMARY_FILE"
 }
 
 if ! JOBS=$(jobs_json); then
-	say "⚠ CI time (S-37): the run's jobs were not read (GITHUB_TOKEN, GITHUB_REPOSITORY or GITHUB_RUN_ID is not set, or the API refused). The wall is not reported, so the gate cannot judge it; the run is not failed."
-	write_summary "⚠ CI time (S-37): the run's jobs were not read. The wall is not reported, so the gate cannot judge it; the run is not failed."
+	say "⚠ CI time (S-37): the run's jobs were not read (GITHUB_TOKEN, GITHUB_REPOSITORY or GITHUB_RUN_ID is not set, or the API refused). The wall is not reported; the run is not failed."
+	write_summary "⚠ CI time (S-37): the run's jobs were not read. The wall is not reported; the run is not failed."
 	exit 0
 fi
 
-if ! RESULT=$(printf '%s' "$JOBS" | report); then
-	say "⚠ CI time (S-37): the run's jobs could not be read. The wall is not reported, so the gate cannot judge it; the run is not failed."
-	write_summary "⚠ CI time (S-37): the run's jobs could not be read. The wall is not reported, so the gate cannot judge it; the run is not failed."
+if ! REPORT=$(printf '%s' "$JOBS" | report); then
+	say "⚠ CI time (S-37): the run's jobs could not be read. The wall is not reported; the run is not failed."
+	write_summary "⚠ CI time (S-37): the run's jobs could not be read. The wall is not reported; the run is not failed."
 	exit 0
 fi
-
-REPORT=$(printf '%s' "$RESULT" | jq -r '.text')
-OVER=$(printf '%s' "$RESULT" | jq -r '.over')
 
 say "$REPORT"
 write_summary "$REPORT"
@@ -241,11 +209,6 @@ TOTAL=$(printf '%s' "$JOBS" | jq -r 'if (.total_count|type) == "number" then .to
 READ=$(printf '%s' "$JOBS" | jq -r '(.jobs // []) | length' 2>/dev/null || echo 0)
 if [ "${TOTAL:-0}" -gt "${READ:-0}" ] 2>/dev/null; then
 	say "⚠ the run has $TOTAL jobs and the API returned $READ; the wall covers the $READ read."
-fi
-
-# The gate (card H): a wall over the limit fails the run. The report above says so.
-if [ "$GATE" = "true" ] && [ "$OVER" = "true" ]; then
-	exit 1
 fi
 
 exit 0

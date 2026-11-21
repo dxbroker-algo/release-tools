@@ -39,8 +39,12 @@ jobs:
   # start to the last job's end, the queue before the first job excluded (design §2).
   #
   # THE GATE (card H, T-1787, at T-1576's close): a wall over the 5 min limit fails this
-  # run. The job has no continue-on-error, so the reporter's exit code is the run's verdict;
-  # `fail_on_over` is the shared action's switch, on here.
+  # run. The job has no continue-on-error, so the reporter's exit code is the run's verdict.
+  #
+  # `enforce` is the shared action's switch (lead ruling A4: T-1790 CI-TIME-ENFORCE adds it
+  # to the action first). The action cannot fail a run until that lands, so the switch is
+  # inert until then. This repo runs the action from its own tree, so it needs no re-pin;
+  # the consumers (the extension, root-infra) pin the sha that carries it.
   #
   # It needs every other job and runs whatever they did (`always()`), so a red run is
   # reported too. It reads the run's jobs with the workflow's own token (one API call,
@@ -63,4 +67,4 @@ jobs:
         uses: ./ci-time
         with:
           limit: "5"
-          fail_on_over: "true"
+          enforce: "true"
