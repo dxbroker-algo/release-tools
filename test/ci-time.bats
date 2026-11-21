@@ -105,3 +105,77 @@ LATE="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-late.json"
 	grep -q 'CI_TIME_LIMIT_MINUTES: ${{ inputs.limit }}' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
 	grep -q 'default: "5"' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
 }
+
+# enforce (design ci-time-limits A4): the same script is the gate. Five proofs: under, over, a
+# truncated jobs file, a refused read, a bad limit.
+@test "enforce: a wall under the limit passes" {
+	run bash "$CI_TIME" --jobs "$JOBS" --limit 5 --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 3m 00s — under the 5 min limit."* ]] || false
+}
+
+@test "enforce: a wall over the limit exits 1 with an error naming the wall and the limit" {
+	run bash "$CI_TIME" --jobs "$JOBS" --limit 2 --enforce
+	[ "$status" -eq 1 ]
+	[[ $output == *"::error::CI time (S-37): the run's wall is 3m 00s, over the 2 min limit."* ]] || false
+	[[ $output == *"This run is failed."* ]] || false
+	[[ $output != *"REPORT-ONLY"* ]] || false
+}
+
+@test "enforce: a truncated jobs list fails closed" {
+	local f="$BATS_TEST_TMPDIR/truncated.json"
+	jq '.total_count = 101' "$JOBS" >"$f"
+	run bash "$CI_TIME" --jobs "$f" --limit 5 --enforce
+	[ "$status" -eq 1 ]
+	[[ $output == *"::error::"*"only 5 were read"* ]] || false
+	# report-only, the same file is a warning and exit 0
+	run bash "$CI_TIME" --jobs "$f" --limit 5
+	[ "$status" -eq 0 ]
+}
+
+@test "enforce: a refused read fails closed, report-only does not" {
+	export GITHUB_TOKEN=t GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1
+	export GITHUB_API_URL="file:///nonexistent"
+	run bash "$CI_TIME" --limit 5 --enforce
+	[ "$status" -eq 1 ]
+	[[ $output == *"::error::CI time (S-37): the run's jobs were not read"* ]] || false
+	run bash "$CI_TIME" --limit 5
+	[ "$status" -eq 0 ]
+}
+
+@test "enforce: a run with no jobs fails closed" {
+	local f="$BATS_TEST_TMPDIR/empty.json"
+	printf '{"total_count":0,"jobs":[]}' >"$f"
+	run bash "$CI_TIME" --jobs "$f" --limit 5 --enforce
+	[ "$status" -eq 1 ]
+	[[ $output == *"::error::"*"no job ran"* ]] || false
+}
+
+@test "enforce: an unreadable jobs file fails closed" {
+	local f="$BATS_TEST_TMPDIR/bad.json"
+	printf 'not json' >"$f"
+	run bash "$CI_TIME" --jobs "$f" --limit 5 --enforce
+	[ "$status" -eq 1 ]
+	[[ $output == *"::error::"*"could not be read"* ]] || false
+}
+
+@test "enforce: a bad limit is exit 2, enforced or not" {
+	run bash "$CI_TIME" --jobs "$JOBS" --limit abc --enforce
+	[ "$status" -eq 2 ]
+	run bash "$CI_TIME" --jobs "$JOBS" --limit abc
+	[ "$status" -eq 2 ]
+}
+
+@test "enforce: CI_TIME_ENFORCE=true is the same as --enforce; anything else is an error" {
+	CI_TIME_ENFORCE=true run bash "$CI_TIME" --jobs "$JOBS" --limit 2
+	[ "$status" -eq 1 ]
+	CI_TIME_ENFORCE=false run bash "$CI_TIME" --jobs "$JOBS" --limit 2
+	[ "$status" -eq 0 ]
+	CI_TIME_ENFORCE=yes run bash "$CI_TIME" --jobs "$JOBS" --limit 2
+	[ "$status" -eq 2 ]
+}
+
+@test "the action takes enforce, default false, and passes it to the script" {
+	grep -q 'CI_TIME_ENFORCE: ${{ inputs.enforce }}' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
+	awk '/^  enforce:/{f=1} f&&/default:/{print; exit}' "$BATS_TEST_DIRNAME/../ci-time/action.yml" | grep -q 'default: "false"'
+}

@@ -4,7 +4,8 @@ description: >-
   queue before the first job excluded and reported apart), the table of the jobs, and the
   verdict against the limit. It also prints a warning naming any job that began or ended after
   this job started, because that job is missing from this job's `needs:` and shortens the wall
-  silently. Report-only: it never fails the run. Run it as the last job, `if: always()`, with
+  silently. Report-only by default; with `enforce: "true"` it fails the run when the wall is over
+  the limit, and fails closed when the run's jobs cannot be read. Run it as the last job, `if: always()`, with
   `needs:` every other job and `permissions: actions: read`.
 inputs:
   limit:
@@ -13,6 +14,11 @@ inputs:
   token:
     description: "A token that can read the run's jobs (actions: read)."
     default: ${{ github.token }}
+  enforce:
+    description: >-
+      "true" fails the run when the wall is over the limit, or when the run's jobs could not be
+      read (API error, no jobs, a truncated list). "false" is report-only: it never fails the run.
+    default: "false"
 runs:
   using: composite
   steps:
@@ -20,4 +26,5 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
         CI_TIME_LIMIT_MINUTES: ${{ inputs.limit }}
+        CI_TIME_ENFORCE: ${{ inputs.enforce }}
       run: '"$GITHUB_ACTION_PATH/../ci-time.sh"'
