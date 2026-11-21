@@ -247,8 +247,12 @@ if [ "$ENFORCE" = true ]; then
 	fi
 	case "$REPORT" in
 	*"no job ran in this run"*)
-		say "::error::CI time (S-37): no job ran in this run, so the wall is not known. The run is failed (enforce is on)."
-		exit 1
+		if [ "${READ:-0}" -eq 0 ] 2>/dev/null; then
+			say "::error::CI time (S-37): the API returned no jobs, so the wall is not known. The run is failed (enforce is on)."
+			exit 1
+		fi
+		# Jobs were read but none ran to an end (every other job was skipped): a known wall of 0.
+		say "CI time (S-37): every other job was skipped: wall 0, under the $LIMIT min limit."
 		;;
 	*"— OVER the "*)
 		WALL=$(printf '%s\n' "$REPORT" | sed -n "s/.*the run's wall is \(.*\) — OVER the \(.*\) min limit\..*/\1/p" | head -n 1)

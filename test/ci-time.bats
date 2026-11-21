@@ -148,7 +148,7 @@ LATE="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-late.json"
 	printf '{"total_count":0,"jobs":[]}' >"$f"
 	run bash "$CI_TIME" --jobs "$f" --limit 5 --enforce
 	[ "$status" -eq 1 ]
-	[[ $output == *"::error::"*"no job ran"* ]] || false
+	[[ $output == *"::error::"*"API returned no jobs"* ]] || false
 }
 
 @test "enforce: an unreadable jobs file fails closed" {
@@ -178,4 +178,18 @@ LATE="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-late.json"
 @test "the action takes enforce, default false, and passes it to the script" {
 	grep -q 'CI_TIME_ENFORCE: ${{ inputs.enforce }}' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
 	awk '/^  enforce:/{f=1} f&&/default:/{print; exit}' "$BATS_TEST_DIRNAME/../ci-time/action.yml" | grep -q 'default: "false"'
+}
+
+@test "enforce: every other job skipped is a known wall of 0 and passes" {
+	local f="$BATS_TEST_TMPDIR/skipped.json"
+	cat >"$f" <<'JSON'
+{"total_count":2,"jobs":[
+{"name":"test","status":"completed","conclusion":"skipped","created_at":"2026-11-21T10:00:00Z","started_at":"2026-11-21T10:00:01Z","completed_at":"2026-11-21T10:00:01Z"},
+{"name":"CI time (S-37)","status":"in_progress","conclusion":null,"created_at":"2026-11-21T10:00:02Z","started_at":"2026-11-21T10:00:03Z","completed_at":null,"runner_name":"runner-1"}
+]}
+JSON
+	RUNNER_NAME=runner-1 run bash "$CI_TIME" --jobs "$f" --limit 5 --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"every other job was skipped: wall 0"* ]] || false
+	[[ $output != *"::error::"* ]] || false
 }
