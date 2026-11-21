@@ -551,9 +551,12 @@ did (`if: always()`), and prints what the run cost.
   out of the wall.
 - **It reads the run's jobs** with the workflow's own `GITHUB_TOKEN` (one API call, inside the
   workflow, `actions: read`) and prints the table: job, status, start, end, queue, duration.
-- **It is report-only:** it prints a ⚠ line when the wall is over the limit (5 min for a CI run,
-  20 min for a prod CD run) and **never fails the run**. The gate turns on at card H (T-1576's
-  close), one PR per repo, each merging alone.
+- **It reports, and it can gate.** By default it prints a ⚠ line when the wall is over the
+  limit (5 min for a CI run, 20 min for a prod CD run) and **never fails the run**. With
+  `fail_on_over: "true"` it is the gate: a wall over the limit fails the run. The gate never
+  fails a run it could not judge — a wall that was not read (no token, the API refused) is
+  reported, not failed. This repo's own workflow runs the gate (card H, T-1787, at T-1576's
+  close); the other repositories turn it on in their own card, each merging alone.
 
 - **It checks its own `needs:`.** A job that is still running or waiting, or ended after the time job started, is not in
   the time job's `needs:`, and it shortens the wall silently. The report prints a ⚠ line with
@@ -573,21 +576,25 @@ re-pin in each consumer.
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    continue-on-error: true         # report-only until card H
     permissions:
       actions: read
     steps:
       - uses: dxbroker-algo/release-tools/ci-time@<sha>
         with:
           limit: "5"                # 5 for a CI run, 20 for a prod CD run
+          fail_on_over: "true"      # the gate: a wall over the limit fails the run
 ```
 
-It needs no checkout. Inputs: `limit` (minutes, default `5`) and `token` (default `github.token`).
+It needs no checkout. Inputs: `limit` (minutes, default `5`), `token` (default `github.token`) and
+`fail_on_over` (`"true"` to fail the run when the wall is over the limit, default `"false"`, report
+only). The gate is the job's own verdict: the job carries no `continue-on-error`, so the action's
+exit code is the run's.
 
 The reporter is `ci-time.sh`, which the action runs; it can also be run by hand over a fixed jobs list:
 
 ```sh
-ci-time.sh --jobs test/fixtures/ci-time-jobs.json --limit 5   # no network: a fixed jobs list
+ci-time.sh --jobs test/fixtures/ci-time-jobs.json --limit 5              # no network: a fixed jobs list
+ci-time.sh --jobs test/fixtures/ci-time-jobs.json --limit 2 --fail-on-over   # the gate
 ```
 
 ## Development

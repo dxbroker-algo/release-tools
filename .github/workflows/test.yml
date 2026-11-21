@@ -38,9 +38,9 @@ jobs:
   # CI time (S-37) — design T-1723 §6 item 2: this run's own wall, from the first job's
   # start to the last job's end, the queue before the first job excluded (design §2).
   #
-  # REPORT-ONLY: it prints the table and a ⚠ line over the 5 min limit and NEVER fails the
-  # run. Card H (at T-1576's close) turns the verdict into a gate, one PR per repo, each
-  # merging alone.
+  # THE GATE (card H, T-1787, at T-1576's close): a wall over the 5 min limit fails this
+  # run. The job has no continue-on-error, so the reporter's exit code is the run's verdict;
+  # `fail_on_over` is the shared action's switch, on here.
   #
   # It needs every other job and runs whatever they did (`always()`), so a red run is
   # reported too. It reads the run's jobs with the workflow's own token (one API call,
@@ -54,8 +54,6 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # report-only until card H (ci-time-limits §6); card H removes it
-    continue-on-error: true
     permissions:
       actions: read
       contents: read
@@ -65,3 +63,4 @@ jobs:
         uses: ./ci-time
         with:
           limit: "5"
+          fail_on_over: "true"
