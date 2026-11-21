@@ -54,6 +54,8 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # report-only until card H (ci-time-limits §6); card H removes it
+    continue-on-error: true
     permissions:
       actions: read
       contents: read
