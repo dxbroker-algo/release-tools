@@ -61,8 +61,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
-      - name: report this run's time
-        run: ./ci-time.sh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CI_TIME_LIMIT_MINUTES: 5
+      - name: report this run's time, with the action it ships
+        uses: ./ci-time
+        with:
+          limit: "5"

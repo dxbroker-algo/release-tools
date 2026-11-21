@@ -1,0 +1,23 @@
+name: release-tools ci-time
+description: >-
+  Report what this CI run cost: the wall from the first job's start to the last job's end (the
+  queue before the first job excluded and reported apart), the table of the jobs, and the
+  verdict against the limit. It also prints a warning naming any job that began or ended after
+  this job started, because that job is missing from this job's `needs:` and shortens the wall
+  silently. Report-only: it never fails the run. Run it as the last job, `if: always()`, with
+  `needs:` every other job and `permissions: actions: read`.
+inputs:
+  limit:
+    description: "The limit in minutes: 5 for a CI run, 20 for a prod CD run."
+    default: "5"
+  token:
+    description: "A token that can read the run's jobs (actions: read)."
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        CI_TIME_LIMIT_MINUTES: ${{ inputs.limit }}
+      run: '"$GITHUB_ACTION_PATH/../ci-time.sh"'

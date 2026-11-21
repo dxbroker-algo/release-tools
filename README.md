@@ -555,7 +555,36 @@ did (`if: always()`), and prints what the run cost.
   20 min for a prod CD run) and **never fails the run**. The gate turns on at card H (T-1576's
   close), one PR per repo, each merging alone.
 
-The reporter is `ci-time.sh`, one script the repo's workflows share:
+- **It checks its own `needs:`.** A job that is still running or waiting, or ended after the time job started, is not in
+  the time job's `needs:`, and it shortens the wall silently. The report prints a ⚠ line with
+  the job's name. (Every job in `needs:` has completed when the time job starts, so any other job that is running,
+  waiting for a runner, or ended later is named; a skipped job is not. If the time job cannot tell
+  which job it is, the line says it did not look.)
+
+### Use it from a repository
+
+One pinned action, the same wall in every repository; a change to the wall is one PR here and one
+re-pin in each consumer.
+
+```yaml
+  ci-time:
+    name: CI time (S-37)
+    needs: [every, other, job]      # every other job: the report warns on a job it finds missing
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true         # report-only until card H
+    permissions:
+      actions: read
+    steps:
+      - uses: dxbroker-algo/release-tools/ci-time@<sha>
+        with:
+          limit: "5"                # 5 for a CI run, 20 for a prod CD run
+```
+
+It needs no checkout. Inputs: `limit` (minutes, default `5`) and `token` (default `github.token`).
+
+The reporter is `ci-time.sh`, which the action runs; it can also be run by hand over a fixed jobs list:
 
 ```sh
 ci-time.sh --jobs test/fixtures/ci-time-jobs.json --limit 5   # no network: a fixed jobs list

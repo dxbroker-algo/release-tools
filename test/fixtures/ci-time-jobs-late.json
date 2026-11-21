@@ -1,0 +1,66 @@
+{
+  "total_count": 7,
+  "jobs": [
+    {
+      "name": "test",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": "2026-11-21T10:00:05Z",
+      "completed_at": "2026-11-21T10:01:05Z",
+      "runner_name": "runner-0"
+    },
+    {
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": "2026-11-21T10:00:10Z",
+      "completed_at": "2026-11-21T10:00:40Z",
+      "runner_name": "runner-0"
+    },
+    {
+      "name": "late",
+      "status": "completed",
+      "conclusion": "success",
+      "runner_name": "runner-1",
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": "2026-11-21T10:00:05Z",
+      "completed_at": "2026-11-21T10:02:30Z"
+    },
+    {
+      "name": "deploy-check",
+      "status": "in_progress",
+      "conclusion": null,
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": "2026-11-21T10:00:06Z",
+      "completed_at": null,
+      "runner_name": "runner-2"
+    },
+    {
+      "name": "waiting",
+      "status": "queued",
+      "conclusion": null,
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": null,
+      "completed_at": null
+    },
+    {
+      "name": "skipped",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": "2026-11-21T10:01:20Z",
+      "completed_at": "2026-11-21T10:01:20Z"
+    },
+    {
+      "name": "CI time (S-37)",
+      "status": "in_progress",
+      "conclusion": null,
+      "runner_name": "runner-3",
+      "created_at": "2026-11-21T10:01:06Z",
+      "started_at": "2026-11-21T10:01:10Z",
+      "completed_at": null
+    }
+  ]
+}

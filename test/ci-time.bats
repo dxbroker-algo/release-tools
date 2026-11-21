@@ -18,7 +18,7 @@ report() {
 	[[ $output == *"the run's wall is 3m 00s"* ]] || false
 }
 
-@test "a skipped job, a queued job and the reporter's own job are not in the wall" {
+@test "a skipped job and the reporter's own job are not in the wall" {
 	# The skipped job starts at 10:00:00, a second before the first real job: counting it
 	# would make the wall 3m 05s.
 	report 5
@@ -31,7 +31,6 @@ report() {
 	[[ $output == *"| test | completed (success) | 10:00:05 | 10:01:05 | 5s | 1m 00s |"* ]] || false
 	[[ $output == *"| lint | completed (success) | 10:00:10 | 10:00:40 | 10s | 30s |"* ]] || false
 	[[ $output == *"| slow | completed (failure) | 10:00:05 | 10:03:05 | 5s | 3m 00s |"* ]] || false
-	[[ $output == *"| queued | queued | — | — | — | — |"* ]] || false
 	[[ $output == *"| CI time (S-37) | in_progress | 10:03:06 | — | 1s | — |"* ]] || false
 }
 
@@ -64,4 +63,45 @@ report() {
 	run bash "$CI_TIME"
 	[ "$status" -eq 0 ]
 	[[ $output == *"the run's jobs were not read"* ]] || false
+}
+
+# The self-check: a job that began or ended after this job started is not in its `needs:`.
+LATE="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-late.json"
+
+@test "a job that ended after this job started is named: it is missing from needs" {
+	RUNNER_NAME=runner-3 run bash "$CI_TIME" --jobs "$LATE" --limit 5
+	[ "$status" -eq 0 ]
+	[[ $output == *"⚠ late, deploy-check, waiting began, is still waiting, or ended after this job started, so they are not in this job's needs:"* ]] || false
+}
+
+@test "a job still running, or still waiting for a runner, is named too" {
+	RUNNER_NAME=runner-3 run bash "$CI_TIME" --jobs "$LATE" --limit 5
+	[[ $output == *"deploy-check"* ]] || false
+	[[ $output == *"waiting"* ]] || false
+	# the jobs that ended before this one started are not named
+	[[ $output != *"⚠ test"* ]] || false
+	[[ $output != *"lint began"* ]] || false
+}
+
+@test "every job in needs: says so, and names no one" {
+	report 5
+	[[ $output == *"needs: every job that ran is in this job's needs:."* ]] || false
+	[[ $output != *"began or ended after"* ]] || false
+}
+
+@test "a skipped job is not missing from needs, though GitHub stamps it after this job started" {
+	RUNNER_NAME=runner-3 run bash "$CI_TIME" --jobs "$LATE" --limit 5
+	[[ $output == *"⚠ late, deploy-check, waiting began"* ]] || false
+}
+
+@test "two running jobs and no runner to tell them apart: the self-check says it did not look" {
+	run bash "$CI_TIME" --jobs "$LATE" --limit 5
+	[ "$status" -eq 0 ]
+	[[ $output == *"⚠ not checked: which job is this one could not be told"* ]] || false
+}
+
+@test "the action runs the shared script with its limit and token" {
+	grep -q 'ci-time.sh' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
+	grep -q 'CI_TIME_LIMIT_MINUTES: ${{ inputs.limit }}' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
+	grep -q 'default: "5"' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
 }

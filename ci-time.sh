@@ -9,6 +9,11 @@
 # One API call — the run's jobs — with the workflow's own GITHUB_TOKEN, inside the workflow:
 # no seat's quota, no second tool. The arithmetic is jq's; this file only reads and prints.
 #
+# It also checks its own `needs:` (design CI-TIME-SHARED): a job that began or ended after this
+# job started, or is still running or waiting for a runner, is not in this job's `needs:`
+# (every job that is has completed), and the wall it shortened silently is reported with the
+# job's name on a ⚠ line.
+#
 # REPORT-ONLY: it prints its table and its ⚠ line and exits 0, whatever it reads. Card H (at
 # T-1576's close) turns the verdict into a gate.
 #
@@ -22,12 +27,14 @@
 #   GITHUB_RUN_ID           the run to read
 #   CI_TIME_LIMIT_MINUTES   the limit: 5 for a CI run, 20 for a prod CD run
 #   GITHUB_STEP_SUMMARY     where the run's page gets the same report
+#   RUNNER_NAME             this job's runner: how it finds itself among the run's jobs
 set -euo pipefail
 
 LIMIT="${CI_TIME_LIMIT_MINUTES:-5}"
 JOBS_FILE=""
 REPOSITORY="${GITHUB_REPOSITORY:-}"
 RUN_ID="${GITHUB_RUN_ID:-}"
+RUNNER="${RUNNER_NAME:-}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -40,7 +47,7 @@ while [ $# -gt 0 ]; do
 		shift 2
 		;;
 	-h | --help)
-		sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -89,6 +96,7 @@ report() {
 		--arg limit "$LIMIT" \
 		--arg repo "$REPOSITORY" \
 		--arg run "$RUN_ID" \
+		--arg runner "$RUNNER" \
 		'
 		def ts:
 			if type == "string" and length > 0
@@ -117,6 +125,7 @@ report() {
 			conclusion: (.conclusion // ""),
 			start_iso: (if (.started_at|type) == "string" then .started_at else "" end),
 			end_iso: (if (.completed_at|type) == "string" then .completed_at else "" end),
+			runner: (.runner_name // ""),
 			created: (.created_at | ts),
 			start: (.started_at | ts),
 			end: (.completed_at | ts)
@@ -131,6 +140,17 @@ report() {
 		| (if $first == null then null else $last - $first end) as $wall
 		| ([$rows[] | select(.created != null) | .created]|min) as $earliest
 		| (if $first == null or $earliest == null then null else $first - $earliest end) as $queue_before
+		| ([$jobs[] | select(.status == "in_progress")]) as $running
+		| (if ($running | length) == 1 then $running[0]
+			else ([$running[] | select($runner != "" and .runner == $runner)]) as $mine
+				| (if ($mine | length) == 1 then $mine[0] else null end)
+			end) as $self
+		| (if $self == null or $self.start == null then null else $self.start end) as $self_start
+		| (if $self_start == null then []
+			else [$rows[]
+				| select(.name != $self.name and .conclusion != "skipped"
+					and (.status != "completed" or .end == null or .end > $self_start))
+				| .name] end) as $late
 		| ($limit|tonumber) as $limit_min
 		| ($limit_min * 60) as $limit_s
 		| (if $wall != null and $wall > $limit_s then true else false end) as $over
@@ -144,12 +164,18 @@ report() {
 			elif $queue_before > 60
 			then "⚠ the queue before the first job is \(($queue_before)|dur) (over 1 min — runner supply, not code; it is excluded from the wall)."
 			else "Queue before the first job: \(($queue_before)|dur) (excluded from the wall)." end) as $queue_line
+		| (if ($running | length) == 0 then ""
+			elif $self == null
+			then "⚠ not checked: which job is this one could not be told, so the jobs missing from its needs: were not looked for."
+			elif ($late | length) > 0
+			then "⚠ \($late | join(", ")) began, is still waiting, or ended after this job started, so \(if ($late|length) == 1 then "it is" else "they are" end) not in this job\u0027s needs: — add \(if ($late|length) == 1 then "it" else "them" end), or the wall is shortened silently."
+			else "needs: every job that ran is in this job\u0027s needs:." end) as $needs_line
 		| ([
 			"### CI time (S-37) — \($repo) run \($run)",
 			"",
 			"| job | status | start (UTC) | end (UTC) | queue | duration |",
 			"| --- | --- | --- | --- | --- | --- |"
-		] + ($rows | map(row_text)) + ["", $verdict, $queue_line]) | join("\n")
+		] + ($rows | map(row_text)) + ["", $verdict, $queue_line] + (if $needs_line == "" then [] else [$needs_line] end)) | join("\n")
 		'
 }
 
