@@ -247,11 +247,13 @@ if [ "$ENFORCE" = true ]; then
 	fi
 	case "$REPORT" in
 	*"no job ran in this run"*)
-		if [ "${READ:-0}" -eq 0 ] 2>/dev/null; then
-			say "::error::CI time (S-37): the API returned no jobs, so the wall is not known. The run is failed (enforce is on)."
+		# Only a skipped job is proof that another job came back: the time job itself is in progress.
+		SKIPPED=$(printf '%s' "$JOBS" | jq -r '[(.jobs // [])[] | select(.status == "completed" and .conclusion == "skipped")] | length' 2>/dev/null || echo 0)
+		if [ "${SKIPPED:-0}" -eq 0 ] 2>/dev/null; then
+			say "::error::CI time (S-37): no job other than this one came back from the API, so the wall is not known. The run is failed (enforce is on)."
 			exit 1
 		fi
-		# Jobs were read but none ran to an end (every other job was skipped): a known wall of 0.
+		# Another job came back and none ran to an end (every other job was skipped): a known wall of 0.
 		say "CI time (S-37): every other job was skipped: wall 0, under the $LIMIT min limit."
 		;;
 	*"— OVER the "*)

@@ -148,7 +148,7 @@ LATE="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-late.json"
 	printf '{"total_count":0,"jobs":[]}' >"$f"
 	run bash "$CI_TIME" --jobs "$f" --limit 5 --enforce
 	[ "$status" -eq 1 ]
-	[[ $output == *"::error::"*"API returned no jobs"* ]] || false
+	[[ $output == *"::error::"*"no job other than this one"* ]] || false
 }
 
 @test "enforce: an unreadable jobs file fails closed" {
@@ -192,4 +192,16 @@ JSON
 	[ "$status" -eq 0 ]
 	[[ $output == *"every other job was skipped: wall 0"* ]] || false
 	[[ $output != *"::error::"* ]] || false
+}
+
+@test "enforce: a list holding only this job fails closed (a re-run that lost the other jobs)" {
+	local f="$BATS_TEST_TMPDIR/self-only.json"
+	cat >"$f" <<'JSON'
+{"total_count":1,"jobs":[
+{"name":"CI time (S-37)","status":"in_progress","conclusion":null,"created_at":"2026-11-21T10:00:02Z","started_at":"2026-11-21T10:00:03Z","completed_at":null,"runner_name":"runner-1"}
+]}
+JSON
+	RUNNER_NAME=runner-1 run bash "$CI_TIME" --jobs "$f" --limit 5 --enforce
+	[ "$status" -eq 1 ]
+	[[ $output == *"::error::"*"no job other than this one"* ]] || false
 }
