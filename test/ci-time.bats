@@ -18,7 +18,7 @@ report() {
 	[[ $output == *"the run's wall is 3m 00s"* ]] || false
 }
 
-@test "a skipped job, a queued job and the reporter's own job are not in the wall" {
+@test "a skipped job and the reporter's own job are not in the wall" {
 	# The skipped job starts at 10:00:00, a second before the first real job: counting it
 	# would make the wall 3m 05s.
 	report 5
@@ -31,7 +31,6 @@ report() {
 	[[ $output == *"| test | completed (success) | 10:00:05 | 10:01:05 | 5s | 1m 00s |"* ]] || false
 	[[ $output == *"| lint | completed (success) | 10:00:10 | 10:00:40 | 10s | 30s |"* ]] || false
 	[[ $output == *"| slow | completed (failure) | 10:00:05 | 10:03:05 | 5s | 3m 00s |"* ]] || false
-	[[ $output == *"| queued | queued | — | — | — | — |"* ]] || false
 	[[ $output == *"| CI time (S-37) | in_progress | 10:03:06 | — | 1s | — |"* ]] || false
 }
 
@@ -72,12 +71,13 @@ LATE="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-late.json"
 @test "a job that ended after this job started is named: it is missing from needs" {
 	RUNNER_NAME=runner-3 run bash "$CI_TIME" --jobs "$LATE" --limit 5
 	[ "$status" -eq 0 ]
-	[[ $output == *"⚠ late, deploy-check began or ended after this job started, so they are not in this job's needs:"* ]] || false
+	[[ $output == *"⚠ late, deploy-check, waiting began, is still waiting, or ended after this job started, so they are not in this job's needs:"* ]] || false
 }
 
-@test "a job still running when this job started is named too" {
+@test "a job still running, or still waiting for a runner, is named too" {
 	RUNNER_NAME=runner-3 run bash "$CI_TIME" --jobs "$LATE" --limit 5
 	[[ $output == *"deploy-check"* ]] || false
+	[[ $output == *"waiting"* ]] || false
 	# the jobs that ended before this one started are not named
 	[[ $output != *"⚠ test"* ]] || false
 	[[ $output != *"lint began"* ]] || false
@@ -89,11 +89,9 @@ LATE="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-late.json"
 	[[ $output != *"began or ended after"* ]] || false
 }
 
-@test "a skipped job and a queued job are not missing from needs" {
-	# The fixture has a skipped job and a queued job, and neither ran after this job started.
-	report 5
-	[[ $output != *"skipped began"* ]] || false
-	[[ $output != *"queued began"* ]] || false
+@test "a skipped job is not missing from needs, though GitHub stamps it after this job started" {
+	RUNNER_NAME=runner-3 run bash "$CI_TIME" --jobs "$LATE" --limit 5
+	[[ $output == *"⚠ late, deploy-check, waiting began"* ]] || false
 }
 
 @test "two running jobs and no runner to tell them apart: the self-check says it did not look" {

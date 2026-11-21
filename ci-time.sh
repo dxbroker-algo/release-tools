@@ -10,8 +10,9 @@
 # no seat's quota, no second tool. The arithmetic is jq's; this file only reads and prints.
 #
 # It also checks its own `needs:` (design CI-TIME-SHARED): a job that began or ended after this
-# job started is not in this job's `needs:`, and the wall it shortened silently is reported
-# with the job's name on a ⚠ line.
+# job started, or is still running or waiting for a runner, is not in this job's `needs:`
+# (every job that is has completed), and the wall it shortened silently is reported with the
+# job's name on a ⚠ line.
 #
 # REPORT-ONLY: it prints its table and its ⚠ line and exits 0, whatever it reads. Card H (at
 # T-1576's close) turns the verdict into a gate.
@@ -147,8 +148,8 @@ report() {
 		| (if $self == null or $self.start == null then null else $self.start end) as $self_start
 		| (if $self_start == null then []
 			else [$rows[]
-				| select(.name != $self.name and .start != null and .conclusion != "skipped"
-					and (.end == null or .end > $self_start))
+				| select(.name != $self.name and .conclusion != "skipped"
+					and (.status != "completed" or .end == null or .end > $self_start))
 				| .name] end) as $late
 		| ($limit|tonumber) as $limit_min
 		| ($limit_min * 60) as $limit_s
@@ -167,7 +168,7 @@ report() {
 			elif $self == null
 			then "⚠ not checked: which job is this one could not be told, so the jobs missing from its needs: were not looked for."
 			elif ($late | length) > 0
-			then "⚠ \($late | join(", ")) began or ended after this job started, so \(if ($late|length) == 1 then "it is" else "they are" end) not in this job\u0027s needs: — add \(if ($late|length) == 1 then "it" else "them" end), or the wall is shortened silently."
+			then "⚠ \($late | join(", ")) began, is still waiting, or ended after this job started, so \(if ($late|length) == 1 then "it is" else "they are" end) not in this job\u0027s needs: — add \(if ($late|length) == 1 then "it" else "them" end), or the wall is shortened silently."
 			else "needs: every job that ran is in this job\u0027s needs:." end) as $needs_line
 		| ([
 			"### CI time (S-37) — \($repo) run \($run)",

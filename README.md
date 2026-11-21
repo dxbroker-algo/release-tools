@@ -555,9 +555,10 @@ did (`if: always()`), and prints what the run cost.
   20 min for a prod CD run) and **never fails the run**. The gate turns on at card H (T-1576's
   close), one PR per repo, each merging alone.
 
-- **It checks its own `needs:`.** A job that began or ended after the time job started is not in
+- **It checks its own `needs:`.** A job that is still running or waiting, or ended after the time job started, is not in
   the time job's `needs:`, and it shortens the wall silently. The report prints a ⚠ line with
-  the job's name. (A job still queued, or skipped, is not named. If the time job cannot tell
+  the job's name. (Every job in `needs:` has completed when the time job starts, so any other job that is running,
+  waiting for a runner, or ended later is named; a skipped job is not. If the time job cannot tell
   which job it is, the line says it did not look.)
 
 ### Use it from a repository
