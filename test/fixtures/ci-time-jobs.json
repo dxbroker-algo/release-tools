@@ -1,0 +1,53 @@
+{
+  "total_count": 6,
+  "jobs": [
+    {
+      "name": "test",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": "2026-11-21T10:00:05Z",
+      "completed_at": "2026-11-21T10:01:05Z"
+    },
+    {
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": "2026-11-21T10:00:10Z",
+      "completed_at": "2026-11-21T10:00:40Z"
+    },
+    {
+      "name": "slow",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": "2026-11-21T10:00:05Z",
+      "completed_at": "2026-11-21T10:03:05Z"
+    },
+    {
+      "name": "skipped",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": "2026-11-21T10:00:00Z",
+      "completed_at": "2026-11-21T10:00:00Z"
+    },
+    {
+      "name": "queued",
+      "status": "queued",
+      "conclusion": null,
+      "created_at": "2026-11-21T10:00:00Z",
+      "started_at": null,
+      "completed_at": null
+    },
+    {
+      "name": "CI time (S-37)",
+      "status": "in_progress",
+      "conclusion": null,
+      "created_at": "2026-11-21T10:03:05Z",
+      "started_at": "2026-11-21T10:03:06Z",
+      "completed_at": null
+    }
+  ]
+}

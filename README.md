@@ -537,6 +537,30 @@ Environment: `SLACK_RELEASES_BOT_TOKEN`, `SLACK_RELEASES_CHANNEL` (`post-merge` 
 `SLACK_API_URL` (tests), `RELEASE_NOW` (tests), `RELEASE_GIT_NAME` / `RELEASE_GIT_EMAIL` (the release
 commit's author, `github-actions[bot]` by default).
 
+## The CI time job (S-37)
+
+Every job of every workflow carries a `timeout-minutes` (the hard kill: a hung job cannot hold a
+runner), and the last job is **CI time (S-37)**: it `needs:` every other job, runs whatever they
+did (`if: always()`), and prints what the run cost.
+
+- **The wall** runs from the first job's `started_at` to the last job's `completed_at`. The queue
+  before the first job is excluded (runner supply, not code) and reported apart; the waits between
+  the jobs are inside the wall, because the job graph is the team's. A job counts only when it ran
+  to an end: a skipped job (GitHub stamps it with a start and a completion at the same instant), a
+  job still queued, and the reporter itself (it reads the jobs while it is still running) are left
+  out of the wall.
+- **It reads the run's jobs** with the workflow's own `GITHUB_TOKEN` (one API call, inside the
+  workflow, `actions: read`) and prints the table: job, status, start, end, queue, duration.
+- **It is report-only:** it prints a ⚠ line when the wall is over the limit (5 min for a CI run,
+  20 min for a prod CD run) and **never fails the run**. The gate turns on at card H (T-1576's
+  close), one PR per repo, each merging alone.
+
+The reporter is `ci-time.sh`, one script the repo's workflows share:
+
+```sh
+ci-time.sh --jobs test/fixtures/ci-time-jobs.json --limit 5   # no network: a fixed jobs list
+```
+
 ## Development
 
 ```sh
