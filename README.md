@@ -573,16 +573,36 @@ re-pin in each consumer.
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    continue-on-error: true         # report-only until card H
+    continue-on-error: true         # report-only; drop it together with enforce: "true"
     permissions:
       actions: read
     steps:
       - uses: dxbroker-algo/release-tools/ci-time@<sha>
         with:
           limit: "5"                # 5 for a CI run, 20 for a prod CD run
+          enforce: "false"          # "true" at T-1576's close: the wall becomes a gate
 ```
 
-It needs no checkout. Inputs: `limit` (minutes, default `5`) and `token` (default `github.token`).
+It needs no checkout. Inputs:
+
+| input | default | |
+| --- | --- | --- |
+| `limit` | `5` | the limit in minutes: 5 for a CI run, 20 for a prod CD run |
+| `token` | `github.token` | a token that can read the run's jobs (`actions: read`) |
+| `enforce` | `false` | `"true"` makes the job the gate (below) |
+
+**`enforce`.** With `"false"` (the default) the action only reports and always exits 0. With
+`"true"` the same script that prints the table also decides:
+
+- the wall is over `limit`: it exits 1 with an `::error::` line naming the wall and the limit;
+- it fails closed, also exit 1 with an `::error::` line: the run's jobs could not be read (no
+  token, an API error), no job ran, or the API returned fewer jobs than the run has, so the wall
+  is not known;
+- an invalid `limit` is exit 2 in either mode.
+
+Set it per repo, at T-1576's close, by re-pinning to a release-tools sha that has it and dropping
+`continue-on-error` from the job (an enforcing job that is `continue-on-error` gates nothing). A
+repo keeps no wall computation of its own: a change to the rule is one PR here and a re-pin.
 
 The reporter is `ci-time.sh`, which the action runs; it can also be run by hand over a fixed jobs list:
 

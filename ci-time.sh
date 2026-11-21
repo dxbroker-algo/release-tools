@@ -14,18 +14,21 @@
 # (every job that is has completed), and the wall it shortened silently is reported with the
 # job's name on a ⚠ line.
 #
-# REPORT-ONLY: it prints its table and its ⚠ line and exits 0, whatever it reads. Card H (at
-# T-1576's close) turns the verdict into a gate.
+# REPORT-ONLY by default: it prints its table and its ⚠ line and exits 0, whatever it reads.
+# With --enforce (CI_TIME_ENFORCE=true; design ci-time-limits A4) the same script is the gate:
+# it exits 1 when the wall is over the limit, and fails closed (exit 1) when the run's jobs
+# could not be read, no job ran, or the API returned fewer jobs than the run has.
 #
 # Needs bash 3.2+, jq and curl. Usage:
 #
-#   ci-time.sh [--jobs FILE] [--limit MINUTES]
+#   ci-time.sh [--jobs FILE] [--limit MINUTES] [--enforce]
 #
 # The environment (set by the workflow):
 #   GITHUB_TOKEN            the workflow's token (actions: read)
 #   GITHUB_REPOSITORY       owner/repo
 #   GITHUB_RUN_ID           the run to read
 #   CI_TIME_LIMIT_MINUTES   the limit: 5 for a CI run, 20 for a prod CD run
+#   CI_TIME_ENFORCE         "true" fails the run (see above); "false" or unset is report-only
 #   GITHUB_STEP_SUMMARY     where the run's page gets the same report
 #   RUNNER_NAME             this job's runner: how it finds itself among the run's jobs
 set -euo pipefail
@@ -35,6 +38,7 @@ JOBS_FILE=""
 REPOSITORY="${GITHUB_REPOSITORY:-}"
 RUN_ID="${GITHUB_RUN_ID:-}"
 RUNNER="${RUNNER_NAME:-}"
+ENFORCE="${CI_TIME_ENFORCE:-false}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -46,8 +50,12 @@ while [ $# -gt 0 ]; do
 		LIMIT="$2"
 		shift 2
 		;;
+	--enforce)
+		ENFORCE=true
+		shift
+		;;
 	-h | --help)
-		sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -59,6 +67,11 @@ done
 
 case "$LIMIT" in
 '' | *[!0-9.]*) printf 'ci-time: error: the limit must be a number of minutes\n' >&2; exit 2 ;;
+esac
+
+case "$ENFORCE" in
+true | false) ;;
+*) printf 'ci-time: error: enforce must be "true" or "false"\n' >&2; exit 2 ;;
 esac
 
 SUMMARY_FILE="${GITHUB_STEP_SUMMARY:-}"
@@ -97,6 +110,7 @@ report() {
 		--arg repo "$REPOSITORY" \
 		--arg run "$RUN_ID" \
 		--arg runner "$RUNNER" \
+		--arg enforce "$ENFORCE" \
 		'
 		def ts:
 			if type == "string" and length > 0
@@ -157,7 +171,7 @@ report() {
 		| (if $wall == null
 			then "CI time (S-37): no job ran in this run — there is no wall to report."
 			elif $over
-			then "⚠ CI time (S-37): the run\u0027s wall is \(($wall)|dur) — OVER the \($limit_min) min limit. REPORT-ONLY: this run is not failed."
+			then "⚠ CI time (S-37): the run\u0027s wall is \(($wall)|dur) — OVER the \($limit_min) min limit.\(if $enforce == "true" then " This run is failed." else " REPORT-ONLY: this run is not failed." end)"
 			else "CI time (S-37): the run\u0027s wall is \(($wall)|dur) — under the \($limit_min) min limit." end) as $verdict
 		| (if $queue_before == null
 			then ""
@@ -185,20 +199,33 @@ write_summary() {
 	{
 		printf '%s\n\n' "$1"
 		printf 'The wall is from the first job\u0027s start to the last job\u0027s end; the queue before the\n'
-		printf 'first job is excluded. The limit is %s min. REPORT-ONLY — this run is not failed.\n' "$LIMIT"
+		if [ "$ENFORCE" = true ]; then
+			printf 'first job is excluded. The limit is %s min, enforced: a wall over it fails this run.\n' "$LIMIT"
+		else
+			printf 'first job is excluded. The limit is %s min. REPORT-ONLY — this run is not failed.\n' "$LIMIT"
+		fi
 	} >>"$SUMMARY_FILE"
 }
 
-if ! JOBS=$(jobs_json); then
-	say "⚠ CI time (S-37): the run's jobs were not read (GITHUB_TOKEN, GITHUB_REPOSITORY or GITHUB_RUN_ID is not set, or the API refused). The wall is not reported; the run is not failed."
-	write_summary "⚠ CI time (S-37): the run's jobs were not read. The wall is not reported; the run is not failed."
+# unreadable WHY: the wall could not be known. Report-only says so and exits 0; enforced, the
+# run fails closed (no wall is not a pass).
+unreadable() {
+	if [ "$ENFORCE" = true ]; then
+		say "::error::CI time (S-37): $1 The wall is unknown, so the run is failed (enforce is on)."
+		write_summary "❌ CI time (S-37): $1 The wall is unknown, so the run is failed."
+		exit 1
+	fi
+	say "⚠ CI time (S-37): $1 The wall is not reported; the run is not failed."
+	write_summary "⚠ CI time (S-37): $1 The wall is not reported; the run is not failed."
 	exit 0
+}
+
+if ! JOBS=$(jobs_json); then
+	unreadable "the run's jobs were not read (GITHUB_TOKEN, GITHUB_REPOSITORY or GITHUB_RUN_ID is not set, or the API refused)."
 fi
 
 if ! REPORT=$(printf '%s' "$JOBS" | report); then
-	say "⚠ CI time (S-37): the run's jobs could not be read. The wall is not reported; the run is not failed."
-	write_summary "⚠ CI time (S-37): the run's jobs could not be read. The wall is not reported; the run is not failed."
-	exit 0
+	unreadable "the run's jobs could not be read."
 fi
 
 say "$REPORT"
@@ -207,8 +234,34 @@ write_summary "$REPORT"
 # The run has more jobs than the API returned (per_page): the wall covers what was read.
 TOTAL=$(printf '%s' "$JOBS" | jq -r 'if (.total_count|type) == "number" then .total_count else 0 end' 2>/dev/null || echo 0)
 READ=$(printf '%s' "$JOBS" | jq -r '(.jobs // []) | length' 2>/dev/null || echo 0)
+TRUNCATED=false
 if [ "${TOTAL:-0}" -gt "${READ:-0}" ] 2>/dev/null; then
+	TRUNCATED=true
 	say "⚠ the run has $TOTAL jobs and the API returned $READ; the wall covers the $READ read."
+fi
+
+if [ "$ENFORCE" = true ]; then
+	if [ "$TRUNCATED" = true ]; then
+		say "::error::CI time (S-37): the run has $TOTAL jobs and only $READ were read, so the wall is not known. The run is failed (enforce is on)."
+		exit 1
+	fi
+	case "$REPORT" in
+	*"no job ran in this run"*)
+		# Only a skipped job is proof that another job came back: the time job itself is in progress.
+		SKIPPED=$(printf '%s' "$JOBS" | jq -r '[(.jobs // [])[] | select(.status == "completed" and .conclusion == "skipped")] | length' 2>/dev/null || echo 0)
+		if [ "${SKIPPED:-0}" -eq 0 ] 2>/dev/null; then
+			say "::error::CI time (S-37): no job other than this one came back from the API, so the wall is not known. The run is failed (enforce is on)."
+			exit 1
+		fi
+		# Another job came back and none ran to an end (every other job was skipped): a known wall of 0.
+		say "CI time (S-37): every other job was skipped: wall 0, under the $LIMIT min limit."
+		;;
+	*"— OVER the "*)
+		WALL=$(printf '%s\n' "$REPORT" | sed -n "s/.*the run's wall is \(.*\) — OVER the \(.*\) min limit\..*/\1/p" | head -n 1)
+		say "::error::CI time (S-37): the run's wall is ${WALL:-over the limit}, over the $LIMIT min limit."
+		exit 1
+		;;
+	esac
 fi
 
 exit 0
