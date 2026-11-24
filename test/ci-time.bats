@@ -285,6 +285,16 @@ STUB
 	[ "$(cat "$SEQ/count")" -eq 1 ]
 }
 
+@test "lag: a reusable-workflow job named 'caller / job' is matched by its caller's name" {
+	api_stub
+	jq '(.jobs[] | select(.name == "slow") | .name) = "slow / inner" | (.jobs[] | select(.name == "slow / inner")) |= (.status = "in_progress" | .conclusion = null | .completed_at = null)' \
+		"$JOBS" >"$SEQ/1.json"
+	jq '(.jobs[] | select(.name == "slow") | .name) = "slow / inner"' "$JOBS" >"$SEQ/2.json"
+	CI_TIME_WAIT_SECONDS=20 run bash "$CI_TIME" --limit 5
+	[ "$status" -eq 0 ]
+	[[ $output == *"reading again"* ]] || false
+}
+
 @test "lag: report-only never fails on a job that stays unfinished" {
 	api_stub
 	jq '.jobs |= map(select(.name == "CI time (S-37)"))' "$JOBS" >"$SEQ/1.json"

@@ -236,14 +236,14 @@ unreadable() {
 }
 
 # settled: the jobs JSON on stdin shows every job named in NEEDS completed. A name matches the
-# job of that name, and a matrix job "name (...)"; a name with no job yet is not settled. Jobs
+# job of that name, a matrix job "name (...)" and a reusable-workflow job "name / job"; a name with no job yet is not settled. Jobs
 # outside NEEDS (a stg or post-live job that runs past this one) are never waited on.
 settled() {
 	jq -e --arg needs "$NEEDS" '
 		(.jobs // []) as $all
 		| ($needs | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $names
 		| all($names[]; . as $n
-			| ([$all[] | select(.name == $n or ((.name // "") | startswith($n + " (")))]) as $m
+			| ([$all[] | select((.name // "") as $jn | $jn == $n or ($jn | startswith($n + " (")) or ($jn | startswith($n + " / ")))]) as $m
 			| ($m | length) > 0 and all($m[]; .status == "completed"))
 	' >/dev/null 2>&1
 }
