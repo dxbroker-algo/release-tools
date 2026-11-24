@@ -342,3 +342,76 @@ STUB
 	[ "$status" -eq 0 ]
 	[[ $output == *"after 1s the jobs API still shows a job in needs (test,lint,slow) unfinished or missing"* ]] || false
 }
+
+# A rerun is measured on its own attempt (ruling A17): GITHUB_RUN_ATTEMPT picks the jobs, and the
+# queue is from the attempt's own run_started_at.
+
+# rerun_jobs: attempt 1 ran 10:00-10:03 (build 10:00:05-10:02:00, test 10:00:10-10:03:00, both with
+# run_attempt 1); a --failed rerun at 15:20 re-ran only test (attempt 2, 15:20:30-15:21:30) and
+# carried build over.
+rerun_jobs() {
+	cat >"$BATS_TEST_TMPDIR/jobs.json" <<'JSON'
+{"total_count": 3, "jobs": [
+ {"name": "build", "run_attempt": 1, "status": "completed", "conclusion": "success",
+  "created_at": "2026-11-24T10:00:00Z", "started_at": "2026-11-24T10:00:05Z", "completed_at": "2026-11-24T10:02:00Z"},
+ {"name": "test", "run_attempt": 2, "status": "completed", "conclusion": "success",
+  "created_at": "2026-11-24T15:20:20Z", "started_at": "2026-11-24T15:20:30Z", "completed_at": "2026-11-24T15:21:30Z"},
+ {"name": "CI time (S-37)", "run_attempt": 2, "status": "in_progress", "conclusion": null,
+  "created_at": "2026-11-24T15:21:30Z", "started_at": "2026-11-24T15:21:32Z", "completed_at": null}
+]}
+JSON
+}
+
+@test "a --failed rerun has the wall of attempt 2's jobs, not the carried-over ones" {
+	rerun_jobs
+	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/jobs.json" --attempt 2 --run-started-at 2026-11-24T15:20:15Z
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 1m 00s"* ]] || false
+	[[ $output == *"Queue before the first job: 15s (excluded from the wall)."* ]] || false
+	[[ $output == *"Carried over from an earlier attempt (not in the wall): build (attempt 1)."* ]] || false
+	[[ $output != *"| build |"* ]] || false
+}
+
+@test "a full rerun measures attempt 2 only" {
+	cat >"$BATS_TEST_TMPDIR/jobs.json" <<'JSON'
+{"total_count": 3, "jobs": [
+ {"name": "build", "run_attempt": 2, "status": "completed", "conclusion": "success",
+  "created_at": "2026-11-24T15:20:20Z", "started_at": "2026-11-24T15:20:30Z", "completed_at": "2026-11-24T15:22:00Z"},
+ {"name": "test", "run_attempt": 2, "status": "completed", "conclusion": "success",
+  "created_at": "2026-11-24T15:20:20Z", "started_at": "2026-11-24T15:20:40Z", "completed_at": "2026-11-24T15:23:30Z"},
+ {"name": "CI time (S-37)", "run_attempt": 2, "status": "in_progress", "conclusion": null,
+  "created_at": "2026-11-24T15:23:30Z", "started_at": "2026-11-24T15:23:32Z", "completed_at": null}
+]}
+JSON
+	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/jobs.json" --attempt 2 --run-started-at 2026-11-24T15:20:15Z
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 3m 00s"* ]] || false
+	[[ $output == *"Queue before the first job: 15s"* ]] || false
+	[[ $output != *"Carried over"* ]] || false
+}
+
+@test "attempt 1 is unchanged: the same wall with or without the attempt" {
+	run bash "$CI_TIME" --jobs "$JOBS" --limit 5
+	without=$output
+	run bash "$CI_TIME" --jobs "$JOBS" --attempt 1 --limit 5
+	[ "$status" -eq 0 ]
+	[ "$output" = "$without" ]
+}
+
+@test "a window mixing attempts is refused: mixed attempts, no wall, the run is failed" {
+	# attempt 1's job overlaps attempt 2's window
+	rerun_jobs
+	jq '.jobs[0].completed_at = "2026-11-24T15:21:00Z"' "$BATS_TEST_TMPDIR/jobs.json" >"$BATS_TEST_TMPDIR/mixed.json"
+	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/mixed.json" --attempt 2 --run-started-at 2026-11-24T15:20:15Z
+	[ "$status" -eq 1 ]
+	[[ $output == *"mixed attempts: job build (attempt 1) of another attempt is inside attempt 2's window."* ]] || false
+	[[ $output != *"the run's wall is"* ]] || false
+}
+
+@test "a negative queue is refused as mixed attempts, enforced or not" {
+	rerun_jobs
+	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/jobs.json" --attempt 2 --run-started-at 2026-11-24T15:25:00Z
+	[ "$status" -eq 1 ]
+	[[ $output == *"mixed attempts: the queue before the first job is -270s, negative"* ]] || false
+	[[ $output != *"the run's wall is"* ]] || false
+}
