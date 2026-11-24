@@ -600,6 +600,12 @@ It needs no checkout. Inputs:
   is not known;
 - an invalid `limit` is exit 2 in either mode.
 
+The jobs API can lag the jobs it reports on: a job in `needs:` may still show `in_progress`, or the
+list may hold no job but this one, a moment after they finished. Reading the API, the script
+re-reads (backing off) until no other job is unfinished and one has completed, bounded at
+`CI_TIME_WAIT_SECONDS` (default 60). Only then does it judge the wall, and under `enforce` it
+fails closed if the wall is still unknown. A `--jobs` file is never waited on.
+
 Set it per repo, at T-1576's close, by re-pinning to a release-tools sha that has it and dropping
 `continue-on-error` from the job (an enforcing job that is `continue-on-error` gates nothing). A
 repo keeps no wall computation of its own: a change to the rule is one PR here and a re-pin.

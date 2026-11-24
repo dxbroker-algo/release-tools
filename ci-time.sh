@@ -14,6 +14,13 @@
 # (every job that is has completed), and the wall it shortened silently is reported with the
 # job's name on a ⚠ line.
 #
+# It does not trust the first read: the jobs API can lag the jobs it reports on (a job in this
+# job's `needs:` still showing in_progress, or missing, a moment after it finished). Reading the
+# run's jobs from the API, it re-reads, with backoff, until no other job is unfinished and at
+# least one other job has completed, bounded at CI_TIME_WAIT_SECONDS (default 60). Only then does
+# it judge the wall, and fail closed if the wall is still unreadable. A --jobs file is static and
+# is never waited on.
+#
 # REPORT-ONLY by default: it prints its table and its ⚠ line and exits 0, whatever it reads.
 # With --enforce (CI_TIME_ENFORCE=true; design ci-time-limits A4) the same script is the gate:
 # it exits 1 when the wall is over the limit, and fails closed (exit 1) when the run's jobs
@@ -30,6 +37,7 @@
 #   CI_TIME_LIMIT_MINUTES   the limit: 5 for a CI run, 20 for a prod CD run
 #   CI_TIME_ENFORCE         "true" fails the run (see above); "false" or unset is report-only
 #   GITHUB_STEP_SUMMARY     where the run's page gets the same report
+#   CI_TIME_WAIT_SECONDS    how long to wait for the other jobs to report completed (default 60)
 #   RUNNER_NAME             this job's runner: how it finds itself among the run's jobs
 set -euo pipefail
 
@@ -39,6 +47,7 @@ REPOSITORY="${GITHUB_REPOSITORY:-}"
 RUN_ID="${GITHUB_RUN_ID:-}"
 RUNNER="${RUNNER_NAME:-}"
 ENFORCE="${CI_TIME_ENFORCE:-false}"
+WAIT="${CI_TIME_WAIT_SECONDS:-60}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -55,7 +64,7 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	-h | --help)
-		sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -72,6 +81,10 @@ esac
 case "$ENFORCE" in
 true | false) ;;
 *) printf 'ci-time: error: enforce must be "true" or "false"\n' >&2; exit 2 ;;
+esac
+
+case "$WAIT" in
+'' | *[!0-9]*) printf 'ci-time: error: CI_TIME_WAIT_SECONDS must be a whole number of seconds\n' >&2; exit 2 ;;
 esac
 
 SUMMARY_FILE="${GITHUB_STEP_SUMMARY:-}"
@@ -220,7 +233,49 @@ unreadable() {
 	exit 0
 }
 
-if ! JOBS=$(jobs_json); then
+# settled: the jobs JSON on stdin shows every other job finished: at least one job completed and
+# none unfinished apart from this one. This job is the in_progress job (the only one, or the one
+# on this runner); when it cannot be told, one in_progress job is taken to be it.
+settled() {
+	jq -e --arg runner "$RUNNER" '
+		(.jobs // []) as $all
+		| ([$all[] | select(.status == "in_progress")]) as $running
+		| (if ($running | length) == 1 then $running[0]
+			else ([$running[] | select($runner != "" and .runner_name == $runner)]) as $mine
+				| (if ($mine | length) == 1 then $mine[0] else null end)
+			end) as $self
+		| ([$all[] | select(.status != "completed")]) as $open
+		| (if $self != null then ([$open[] | select(.name != $self.name)] | length)
+			else ([($open | length) - (if ($running | length) > 0 then 1 else 0 end), 0] | max) end) as $pending
+		| ([$all[] | select(.status == "completed")] | length) as $done
+		| $pending == 0 and $done > 0
+	' >/dev/null 2>&1
+}
+
+JOBS=""
+JOBS_RC=0
+JOBS=$(jobs_json) || JOBS_RC=$?
+if [ -z "$JOBS_FILE" ]; then
+	# The API can lag: re-read, backing off, until the other jobs report completed.
+	delay=1
+	while ! { [ "$JOBS_RC" -eq 0 ] && printf '%s' "$JOBS" | settled; }; do
+		# 2 = no token, repository or run: nothing a re-read would change
+		[ "$JOBS_RC" -ne 2 ] || break
+		[ "$SECONDS" -lt "$WAIT" ] || break
+		left=$((WAIT - SECONDS))
+		[ "$delay" -le "$left" ] || delay=$left
+		say "CI time (S-37): the other jobs have not all reported completed; reading again in ${delay}s."
+		sleep "$delay"
+		delay=$((delay * 2))
+		[ "$delay" -le 10 ] || delay=10
+		JOBS_RC=0
+		JOBS=$(jobs_json) || JOBS_RC=$?
+	done
+	if [ "$JOBS_RC" -eq 0 ] && ! printf '%s' "$JOBS" | settled; then
+		say "⚠ CI time (S-37): after ${WAIT}s the jobs API still shows an unfinished job, or none other than this one."
+	fi
+fi
+if [ "$JOBS_RC" -ne 0 ]; then
 	unreadable "the run's jobs were not read (GITHUB_TOKEN, GITHUB_REPOSITORY or GITHUB_RUN_ID is not set, or the API refused)."
 fi
 
