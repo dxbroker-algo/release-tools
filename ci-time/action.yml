@@ -19,6 +19,12 @@ inputs:
       "true" fails the run when the wall is over the limit, or when the run's jobs could not be
       read (API error, no jobs, a truncated list). "false" is report-only: it never fails the run.
     default: "false"
+  needs:
+    description: >-
+      The names of the jobs in this job's `needs:`, comma-separated. When set, the check
+      re-reads the run's jobs (up to 60 s) until each of them reports completed, because the jobs
+      API can lag. Jobs outside `needs:` are not waited on.
+    default: ""
 runs:
   using: composite
   steps:
@@ -27,4 +33,5 @@ runs:
         GITHUB_TOKEN: ${{ inputs.token }}
         CI_TIME_LIMIT_MINUTES: ${{ inputs.limit }}
         CI_TIME_ENFORCE: ${{ inputs.enforce }}
+        CI_TIME_NEEDS: ${{ inputs.needs }}
       run: '"$GITHUB_ACTION_PATH/../ci-time.sh"'

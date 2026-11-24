@@ -176,6 +176,10 @@ LATE="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-late.json"
 	[ "$status" -eq 2 ]
 }
 
+@test "the action takes needs and passes it to the script" {
+	grep -q 'CI_TIME_NEEDS: ${{ inputs.needs }}' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
+}
+
 @test "the action takes enforce, default false, and passes it to the script" {
 	grep -q 'CI_TIME_ENFORCE: ${{ inputs.enforce }}' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
 	awk '/^  enforce:/{f=1} f&&/default:/{print; exit}' "$BATS_TEST_DIRNAME/../ci-time/action.yml" | grep -q 'default: "false"'
@@ -225,6 +229,7 @@ STUB
 	export SEQ="$BATS_TEST_TMPDIR/seq"
 	export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
 	export GITHUB_TOKEN=t GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1 RUNNER_NAME=runner-1
+	export CI_TIME_NEEDS="test,lint,slow"
 }
 
 @test "lag: the API shows a needs job in_progress, then completed: the wall is measured, no failure" {
@@ -255,7 +260,7 @@ STUB
 	jq '.jobs |= map(select(.name == "CI time (S-37)")) | .total_count = 1' "$JOBS" >"$SEQ/1.json"
 	CI_TIME_WAIT_SECONDS=2 run bash "$CI_TIME" --limit 5 --enforce
 	[ "$status" -eq 1 ]
-	[[ $output == *"after 2s the jobs API still shows an unfinished job, or none other than this one"* ]] || false
+	[[ $output == *"after 2s the jobs API still shows a job in needs (test,lint,slow) unfinished or missing"* ]] || false
 	[[ $output == *"::error::"*"no job other than this one"* ]] || false
 	[ "$(cat "$SEQ/count")" -ge 2 ]
 }
@@ -267,6 +272,16 @@ STUB
 	[ "$status" -eq 0 ]
 	[[ $output != *"reading again"* ]] || false
 	[[ $output == *"the run's wall is 3m 00s — under the 5 min limit."* ]] || false
+	[ "$(cat "$SEQ/count")" -eq 1 ]
+}
+
+@test "lag: a job outside needs that is still running is not waited on" {
+	api_stub
+	jq '.jobs += [{"name":"stg","status":"in_progress","conclusion":null,"created_at":"2026-11-21T10:00:00Z","started_at":"2026-11-21T10:00:20Z","completed_at":null,"runner_name":"runner-9"}] | .total_count = 6' \
+		"$JOBS" >"$SEQ/1.json"
+	CI_TIME_WAIT_SECONDS=20 run bash "$CI_TIME" --limit 5
+	[ "$status" -eq 0 ]
+	[[ $output != *"reading again"* ]] || false
 	[ "$(cat "$SEQ/count")" -eq 1 ]
 }
 
