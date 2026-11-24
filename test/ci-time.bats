@@ -290,9 +290,10 @@ STUB
 	jq '(.jobs[] | select(.name == "slow") | .name) = "slow / inner" | (.jobs[] | select(.name == "slow / inner")) |= (.status = "in_progress" | .conclusion = null | .completed_at = null)' \
 		"$JOBS" >"$SEQ/1.json"
 	jq '(.jobs[] | select(.name == "slow") | .name) = "slow / inner"' "$JOBS" >"$SEQ/2.json"
-	CI_TIME_WAIT_SECONDS=20 run bash "$CI_TIME" --limit 5
+	CI_TIME_WAIT_SECONDS=3 run bash "$CI_TIME" --limit 5
 	[ "$status" -eq 0 ]
 	[[ $output == *"reading again"* ]] || false
+	[[ $output != *"unfinished or missing"* ]] || false
 }
 
 @test "lag: report-only never fails on a job that stays unfinished" {
