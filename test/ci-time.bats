@@ -136,6 +136,7 @@ LATE="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-late.json"
 @test "enforce: a refused read fails closed, report-only does not" {
 	export GITHUB_TOKEN=t GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1
 	export GITHUB_API_URL="file:///nonexistent"
+	export CI_TIME_WAIT_SECONDS=1
 	run bash "$CI_TIME" --limit 5 --enforce
 	[ "$status" -eq 1 ]
 	[[ $output == *"::error::CI time (S-37): the run's jobs were not read"* ]] || false
@@ -175,6 +176,10 @@ LATE="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-late.json"
 	[ "$status" -eq 2 ]
 }
 
+@test "the action takes needs and passes it to the script" {
+	grep -q 'CI_TIME_NEEDS: ${{ inputs.needs }}' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
+}
+
 @test "the action takes enforce, default false, and passes it to the script" {
 	grep -q 'CI_TIME_ENFORCE: ${{ inputs.enforce }}' "$BATS_TEST_DIRNAME/../ci-time/action.yml"
 	awk '/^  enforce:/{f=1} f&&/default:/{print; exit}' "$BATS_TEST_DIRNAME/../ci-time/action.yml" | grep -q 'default: "false"'
@@ -204,4 +209,101 @@ JSON
 	RUNNER_NAME=runner-1 run bash "$CI_TIME" --jobs "$f" --limit 5 --enforce
 	[ "$status" -eq 1 ]
 	[[ $output == *"::error::"*"no job other than this one"* ]] || false
+}
+
+# The jobs API can lag (design tests-5x A10.2): the script re-reads until the other jobs report
+# completed, bounded by CI_TIME_WAIT_SECONDS. A stub curl answers read N with the Nth file of
+# $SEQ (the last one again after that); the reads are counted in $SEQ/count.
+api_stub() {
+	mkdir -p "$BATS_TEST_TMPDIR/bin" "$BATS_TEST_TMPDIR/seq"
+	cat >"$BATS_TEST_TMPDIR/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+seq_dir="$SEQ"
+n=$(($(cat "$seq_dir/count" 2>/dev/null || echo 0) + 1))
+echo "$n" >"$seq_dir/count"
+f="$seq_dir/$n.json"
+[ -f "$f" ] || f=$(find "$seq_dir" -name '*.json' | sort | tail -n 1)
+cat "$f"
+STUB
+	chmod +x "$BATS_TEST_TMPDIR/bin/curl"
+	export SEQ="$BATS_TEST_TMPDIR/seq"
+	export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+	export GITHUB_TOKEN=t GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1 RUNNER_NAME=runner-1
+	export CI_TIME_NEEDS="test,lint,slow"
+}
+
+@test "lag: the API shows a needs job in_progress, then completed: the wall is measured, no failure" {
+	api_stub
+	# first read: "slow" is still in_progress (the API lags)
+	jq '(.jobs[] | select(.name == "slow")) |= (.status = "in_progress" | .conclusion = null | .completed_at = null)' \
+		"$JOBS" >"$SEQ/1.json"
+	cp "$JOBS" "$SEQ/2.json"
+	CI_TIME_WAIT_SECONDS=20 run bash "$CI_TIME" --limit 5 --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"reading again"* ]] || false
+	[[ $output == *"the run's wall is 3m 00s — under the 5 min limit."* ]] || false
+	[[ $output != *"::error::"* ]] || false
+	[ "$(cat "$SEQ/count")" -eq 2 ]
+}
+
+@test "lag: the API first shows no job but this one, then the rest: measured, no failure" {
+	api_stub
+	jq '.jobs |= map(select(.name == "CI time (S-37)")) | .total_count = 1' "$JOBS" >"$SEQ/1.json"
+	cp "$JOBS" "$SEQ/2.json"
+	CI_TIME_WAIT_SECONDS=20 run bash "$CI_TIME" --limit 5 --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 3m 00s"* ]] || false
+}
+
+@test "lag: the API never completes the job: after the wait the run fails closed, with a clear message" {
+	api_stub
+	jq '.jobs |= map(select(.name == "CI time (S-37)")) | .total_count = 1' "$JOBS" >"$SEQ/1.json"
+	CI_TIME_WAIT_SECONDS=2 run bash "$CI_TIME" --limit 5 --enforce
+	[ "$status" -eq 1 ]
+	[[ $output == *"after 2s the jobs API still shows a job in needs (test,lint,slow) unfinished or missing"* ]] || false
+	[[ $output == *"::error::"*"no job other than this one"* ]] || false
+	[ "$(cat "$SEQ/count")" -ge 2 ]
+}
+
+@test "lag: the normal case is read once, with no wait" {
+	api_stub
+	cp "$JOBS" "$SEQ/1.json"
+	CI_TIME_WAIT_SECONDS=20 run bash "$CI_TIME" --limit 5 --enforce
+	[ "$status" -eq 0 ]
+	[[ $output != *"reading again"* ]] || false
+	[[ $output == *"the run's wall is 3m 00s — under the 5 min limit."* ]] || false
+	[ "$(cat "$SEQ/count")" -eq 1 ]
+}
+
+@test "lag: a job outside needs that is still running is not waited on" {
+	api_stub
+	jq '.jobs += [{"name":"stg","status":"in_progress","conclusion":null,"created_at":"2026-11-21T10:00:00Z","started_at":"2026-11-21T10:00:20Z","completed_at":null,"runner_name":"runner-9"}] | .total_count = 6' \
+		"$JOBS" >"$SEQ/1.json"
+	CI_TIME_WAIT_SECONDS=20 run bash "$CI_TIME" --limit 5
+	[ "$status" -eq 0 ]
+	[[ $output != *"reading again"* ]] || false
+	[ "$(cat "$SEQ/count")" -eq 1 ]
+}
+
+@test "lag: a reusable-workflow job named 'caller / job' is matched by its caller's name" {
+	api_stub
+	jq '(.jobs[] | select(.name == "slow") | .name) = "slow / inner" | (.jobs[] | select(.name == "slow / inner")) |= (.status = "in_progress" | .conclusion = null | .completed_at = null)' \
+		"$JOBS" >"$SEQ/1.json"
+	jq '(.jobs[] | select(.name == "slow") | .name) = "slow / inner"' "$JOBS" >"$SEQ/2.json"
+	CI_TIME_WAIT_SECONDS=3 run bash "$CI_TIME" --limit 5
+	[ "$status" -eq 0 ]
+	[[ $output == *"reading again"* ]] || false
+	[[ $output != *"unfinished or missing"* ]] || false
+}
+
+@test "lag: report-only never fails on a job that stays unfinished" {
+	api_stub
+	jq '.jobs |= map(select(.name == "CI time (S-37)"))' "$JOBS" >"$SEQ/1.json"
+	CI_TIME_WAIT_SECONDS=1 run bash "$CI_TIME" --limit 5
+	[ "$status" -eq 0 ]
+}
+
+@test "lag: the wait is a whole number of seconds" {
+	CI_TIME_WAIT_SECONDS=soon run bash "$CI_TIME" --jobs "$JOBS"
+	[ "$status" -eq 2 ]
 }
