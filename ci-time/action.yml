@@ -23,7 +23,9 @@ inputs:
     description: >-
       The names of the jobs in this job's `needs:`, comma-separated. When set, the check
       re-reads the run's jobs (up to 60 s) until each of them reports completed, because the jobs
-      API can lag. Jobs outside `needs:` are not waited on.
+      API can lag. Jobs outside `needs:` are not waited on, and they are not in the wall: they are
+      listed apart, under "outside this job's needs (not in the wall)", and the late-job warning
+      skips them. Unset, every job that ran counts.
     default: ""
 runs:
   using: composite

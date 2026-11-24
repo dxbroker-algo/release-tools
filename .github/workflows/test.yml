@@ -64,7 +64,8 @@ jobs:
       contents: read
     steps:
       - name: report this run's time, with the action it ships
-        uses: dxbroker-algo/release-tools/ci-time@14a6ca4d5cd9b35736adeb902e061d522dae7e5a
+        uses: dxbroker-algo/release-tools/ci-time@8047e5690178436f7e236ceb4e4dd38feed9d27b
         with:
           limit: "5"
           enforce: "true"
+          needs: "test"
