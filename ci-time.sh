@@ -14,6 +14,11 @@
 # (every job that is has completed), and the wall it shortened silently is reported with the
 # job's name on a ⚠ line.
 #
+# With CI_TIME_NEEDS set, the wall counts only the jobs it names (matched as the wait matches
+# them), and the late-job check looks only at them: every other job is listed apart, under
+# "outside this job's needs (not in the wall)", with its times (design ci-time-limits A6.1). Without
+# CI_TIME_NEEDS every job that ran is in the wall.
+#
 # It does not trust the first read: the jobs API can lag the jobs it reports on (a job in this
 # job's `needs:` still showing in_progress, or missing, a moment after it finished). Given
 # CI_TIME_NEEDS (the names of its `needs:` jobs), it re-reads the API, with backoff, until each of
@@ -37,7 +42,7 @@
 #   CI_TIME_LIMIT_MINUTES   the limit: 5 for a CI run, 20 for a prod CD run
 #   CI_TIME_ENFORCE         "true" fails the run (see above); "false" or unset is report-only
 #   GITHUB_STEP_SUMMARY     where the run's page gets the same report
-#   CI_TIME_NEEDS           the names of the jobs in this job's needs:, comma-separated (the wait below)
+#   CI_TIME_NEEDS           the names of the jobs in this job's needs:, comma-separated (the wait, and the wall)
 #   CI_TIME_WAIT_SECONDS    how long to wait for the other jobs to report completed (default 60)
 #   RUNNER_NAME             this job's runner: how it finds itself among the run's jobs
 set -euo pipefail
@@ -126,6 +131,7 @@ report() {
 		--arg run "$RUN_ID" \
 		--arg runner "$RUNNER" \
 		--arg enforce "$ENFORCE" \
+		--arg needs "$NEEDS" \
 		'
 		def ts:
 			if type == "string" and length > 0
@@ -143,11 +149,14 @@ report() {
 					elif $s >= 60 then "\($min)m \($sec2)s"
 					else "\($s)s" end)
 			end;
+		def in_needs($names):
+			. as $jn | any($names[]; . as $n | $jn == $n or ($jn | startswith($n + " (")) or ($jn | startswith($n + " / ")));
 		def clock($iso):
 			if ($iso|type) == "string" and ($iso|length) >= 19 then $iso[11:19] else "—" end;
 		def row_text:
 			"| \(.name) | \(.status)\(if .conclusion != "" then " (\(.conclusion))" else "" end) | \(clock(.start_iso)) | \(clock(.end_iso)) | \(.queue|dur) | \(.duration|dur) |";
 		(.jobs // []) as $all
+		| ($needs | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $names
 		| ($all | map({
 			name: (.name // "(unnamed)"),
 			status: (.status // "unknown"),
@@ -163,17 +172,20 @@ report() {
 			ran: (.start != null and .end != null and .conclusion != "skipped"),
 			queue: (if .start != null and .created != null then (.start - .created) else null end),
 			duration: (if .start != null and .end != null then (.end - .start) else null end)
-		}) | sort_by([(.start // 99999999999), .name])) as $rows
-		| ([$rows[] | select(.ran) | .start] | min) as $first
-		| ([$rows[] | select(.ran) | .end] | max) as $last
-		| (if $first == null then null else $last - $first end) as $wall
-		| ([$rows[] | select(.created != null) | .created]|min) as $earliest
-		| (if $first == null or $earliest == null then null else $first - $earliest end) as $queue_before
+		}) | sort_by([(.start // 99999999999), .name])) as $rows_all
 		| ([$jobs[] | select(.status == "in_progress")]) as $running
 		| (if ($running | length) == 1 then $running[0]
 			else ([$running[] | select($runner != "" and .runner == $runner)]) as $mine
 				| (if ($mine | length) == 1 then $mine[0] else null end)
 			end) as $self
+		| ($rows_all | map(select(($names | length) > 0 and (.name | in_needs($names) | not)
+			and ($self == null or .name != $self.name)))) as $outside
+		| ($rows_all - $outside) as $rows
+		| ([$rows[] | select(.ran) | .start] | min) as $first
+		| ([$rows[] | select(.ran) | .end] | max) as $last
+		| (if $first == null then null else $last - $first end) as $wall
+		| ([$rows[] | select(.created != null) | .created]|min) as $earliest
+		| (if $first == null or $earliest == null then null else $first - $earliest end) as $queue_before
 		| (if $self == null or $self.start == null then null else $self.start end) as $self_start
 		| (if $self_start == null then []
 			else [$rows[]
@@ -204,7 +216,12 @@ report() {
 			"",
 			"| job | status | start (UTC) | end (UTC) | queue | duration |",
 			"| --- | --- | --- | --- | --- | --- |"
-		] + ($rows | map(row_text)) + ["", $verdict, $queue_line] + (if $needs_line == "" then [] else [$needs_line] end)) | join("\n")
+		] + ($rows | map(row_text))
+		+ (if ($outside | length) == 0 then []
+			else ["", "outside this job\u0027s needs (not in the wall):", "",
+				"| job | status | start (UTC) | end (UTC) | queue | duration |",
+				"| --- | --- | --- | --- | --- | --- |"] + ($outside | map(row_text)) end)
+		+ ["", $verdict, $queue_line] + (if $needs_line == "" then [] else [$needs_line] end)) | join("\n")
 		'
 }
 

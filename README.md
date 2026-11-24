@@ -607,6 +607,12 @@ completed, bounded at `CI_TIME_WAIT_SECONDS` (default 60); only then does it jud
 under `enforce` it fails closed if the wall is still unknown. Jobs outside `needs:` (stg, post-live)
 are never waited on. Without `needs`, or with a `--jobs` file, it reads once.
 
+`needs` also scopes the wall: with it set, the wall counts only the jobs it names (matched as the
+wait matches them: the exact name, `name (…)`, `name / …`). Every other job is listed apart with
+its times, under "outside this job's needs (not in the wall)", and the late-job warning does not
+name it, so a staging job that starts beside the CI time job cannot move the wall by a race.
+Without `needs`, every job that ran is in the wall, as before.
+
 Set it per repo, at T-1576's close, by re-pinning to a release-tools sha that has it and dropping
 `continue-on-error` from the job (an enforcing job that is `continue-on-error` gates nothing). A
 repo keeps no wall computation of its own: a change to the rule is one PR here and a re-pin.

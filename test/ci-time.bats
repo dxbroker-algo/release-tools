@@ -307,3 +307,38 @@ STUB
 	CI_TIME_WAIT_SECONDS=soon run bash "$CI_TIME" --jobs "$JOBS"
 	[ "$status" -eq 2 ]
 }
+
+# needs scopes the wall (design ci-time-limits A6.1): with CI_TIME_NEEDS set, only the jobs it
+# names are in the wall; every other job is listed apart. Without it, every job that ran counts.
+@test "needs: a job outside needs is listed apart and the wall is unchanged by it" {
+	# "slow" ends at 10:03:05; without it the wall is test's 10:00:05 to 10:01:05, with it 3m 00s.
+	CI_TIME_NEEDS="test,lint" run bash "$CI_TIME" --jobs "$JOBS" --limit 5
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 1m 00s — under the 5 min limit."* ]] || false
+	[[ $output == *"outside this job's needs (not in the wall):"* ]] || false
+	local outside=${output#*"outside this job's needs (not in the wall):"}
+	[[ $outside == *"| slow | completed (failure) | 10:00:05 | 10:03:05 | 5s | 3m 00s |"* ]] || false
+	[[ ${output%%"outside this job's needs"*} != *"| slow |"* ]] || false
+}
+
+@test "needs: the same job is counted when needs is unset" {
+	run bash "$CI_TIME" --jobs "$JOBS" --limit 5
+	[[ $output == *"the run's wall is 3m 00s"* ]] || false
+	[[ $output != *"outside this job's needs"* ]] || false
+}
+
+@test "needs: a late job outside needs is not warned about; one inside needs still is" {
+	RUNNER_NAME=runner-3 CI_TIME_NEEDS="test,lint,late,deploy-check,waiting" run bash "$CI_TIME" --jobs "$LATE" --limit 5
+	[[ $output == *"⚠ late, deploy-check, waiting began"* ]] || false
+	RUNNER_NAME=runner-3 CI_TIME_NEEDS="test,lint" run bash "$CI_TIME" --jobs "$LATE" --limit 5
+	[[ $output != *"began, is still waiting"* ]] || false
+	[[ $output == *"outside this job's needs (not in the wall):"* ]] || false
+}
+
+@test "needs: a needs job missing from the read still warns" {
+	api_stub
+	jq '.jobs |= map(select(.name != "slow"))' "$JOBS" >"$SEQ/1.json"
+	CI_TIME_WAIT_SECONDS=1 run bash "$CI_TIME" --limit 5
+	[ "$status" -eq 0 ]
+	[[ $output == *"after 1s the jobs API still shows a job in needs (test,lint,slow) unfinished or missing"* ]] || false
+}
