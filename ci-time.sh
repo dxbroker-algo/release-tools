@@ -26,6 +26,14 @@
 # the wall, and fail closed if the wall is still unreadable. Jobs outside `needs:` (stg, post-live)
 # are never waited on. Without CI_TIME_NEEDS, or with a --jobs file, it reads once.
 #
+# It measures the attempt it reports (ruling A17). A rerun (`gh run rerun`, `--failed` or not) is a new
+# attempt of the same run: the jobs counted are those with run_attempt equal to GITHUB_RUN_ATTEMPT (jobs
+# a --failed rerun carried over from an earlier attempt are listed apart and left out), the wall is that
+# attempt's first job start to its last job end, and the queue is that first start minus the attempt's own
+# run_started_at (read from the attempt's API, or given by CI_TIME_RUN_STARTED_AT / --run-started-at).
+# A negative queue, or a job of another attempt inside the attempt's window, is "mixed attempts": it
+# fails the run with an error line, report-only or enforced, and never prints a wall.
+#
 # REPORT-ONLY by default: it prints its table and its ⚠ line and exits 0, whatever it reads.
 # With --enforce (CI_TIME_ENFORCE=true; design ci-time-limits A4) the same script is the gate:
 # it exits 1 when the wall is over the limit, and fails closed (exit 1) when the run's jobs
@@ -44,6 +52,8 @@
 #   GITHUB_STEP_SUMMARY     where the run's page gets the same report
 #   CI_TIME_NEEDS           the names of the jobs in this job's needs:, comma-separated (the wait, and the wall)
 #   CI_TIME_WAIT_SECONDS    how long to wait for the other jobs to report completed (default 60)
+#   GITHUB_RUN_ATTEMPT      the attempt to measure (unset: every job counts, as before attempts)
+#   CI_TIME_RUN_STARTED_AT  the attempt's own start (default: read from the API; else the first job's creation)
 #   RUNNER_NAME             this job's runner: how it finds itself among the run's jobs
 set -euo pipefail
 
@@ -55,6 +65,8 @@ RUNNER="${RUNNER_NAME:-}"
 ENFORCE="${CI_TIME_ENFORCE:-false}"
 WAIT="${CI_TIME_WAIT_SECONDS:-60}"
 NEEDS="${CI_TIME_NEEDS:-}"
+ATTEMPT="${GITHUB_RUN_ATTEMPT:-}"
+RUN_STARTED="${CI_TIME_RUN_STARTED_AT:-}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -64,6 +76,14 @@ while [ $# -gt 0 ]; do
 		;;
 	--limit)
 		LIMIT="$2"
+		shift 2
+		;;
+	--attempt)
+		ATTEMPT="$2"
+		shift 2
+		;;
+	--run-started-at)
+		RUN_STARTED="$2"
 		shift 2
 		;;
 	--enforce)
@@ -94,6 +114,10 @@ case "$WAIT" in
 '' | *[!0-9]*) printf 'ci-time: error: CI_TIME_WAIT_SECONDS must be a whole number of seconds\n' >&2; exit 2 ;;
 esac
 
+case "$ATTEMPT" in
+*[!0-9]*) printf 'ci-time: error: the attempt must be a whole number\n' >&2; exit 2 ;;
+esac
+
 SUMMARY_FILE="${GITHUB_STEP_SUMMARY:-}"
 
 # say LINE: the report's line, to the log and to the run's page.
@@ -116,6 +140,18 @@ jobs_json() {
 		"${GITHUB_API_URL:-https://api.github.com}/repos/$REPOSITORY/actions/runs/$RUN_ID/jobs?per_page=100"
 }
 
+# The attempt's own start: run_started_at of the run's attempt (the run's first start is attempt 1's).
+run_started_at() {
+	[ -n "${GITHUB_TOKEN:-}" ] && [ -n "$REPOSITORY" ] && [ -n "$RUN_ID" ] && [ -n "$ATTEMPT" ] || return 1
+	curl -fsS --max-time 20 \
+		-H "Authorization: Bearer $GITHUB_TOKEN" \
+		-H "Accept: application/vnd.github+json" \
+		-H "X-GitHub-Api-Version: 2022-11-28" \
+		-H "User-Agent: dxb-ci-time" \
+		"${GITHUB_API_URL:-https://api.github.com}/repos/$REPOSITORY/actions/runs/$RUN_ID/attempts/$ATTEMPT" |
+		jq -r '.run_started_at // empty'
+}
+
 # The report: the table, the wall and the verdict. jq reads the jobs JSON and prints the
 # whole report; the arithmetic is here, not in the shell.
 #
@@ -132,6 +168,7 @@ report() {
 		--arg runner "$RUNNER" \
 		--arg enforce "$ENFORCE" \
 		--arg needs "$NEEDS" \
+		--arg run_started "$RUN_STARTED" \
 		'
 		def ts:
 			if type == "string" and length > 0
@@ -185,7 +222,8 @@ report() {
 		| ([$rows[] | select(.ran) | .end] | max) as $last
 		| (if $first == null then null else $last - $first end) as $wall
 		| ([$rows[] | select(.created != null) | .created]|min) as $earliest
-		| (if $first == null or $earliest == null then null else $first - $earliest end) as $queue_before
+		| ($run_started | ts) as $attempt_start
+		| (if $first == null or ($attempt_start // $earliest) == null then null else $first - ($attempt_start // $earliest) end) as $queue_before
 		| (if $self == null or $self.start == null then null else $self.start end) as $self_start
 		| (if $self_start == null then []
 			else [$rows[]
@@ -292,16 +330,58 @@ if [ "$JOBS_RC" -ne 0 ]; then
 	unreadable "the run's jobs were not read (GITHUB_TOKEN, GITHUB_REPOSITORY or GITHUB_RUN_ID is not set, or the API refused)."
 fi
 
+# The attempt measured: only this attempt's jobs go to the report; the jobs a --failed rerun carried
+# over from an earlier attempt are named apart (they were measured with their own attempt).
+# mixed REASON: the window holds another attempt's time; no wall is given.
+mixed() {
+	say "::error::CI time (S-37): mixed attempts: $1 No wall is reported, and the run is failed."
+	write_summary "❌ CI time (S-37): mixed attempts: $1 No wall is reported, and the run is failed."
+	exit 1
+}
+
+CARRIED=""
+if [ -n "$ATTEMPT" ]; then
+	if [ -z "$RUN_STARTED" ] && [ -z "$JOBS_FILE" ]; then
+		RUN_STARTED=$(run_started_at 2>/dev/null) || RUN_STARTED=""
+	fi
+	# one jq pass: "ok", or the reason the window mixes attempts
+	if ! CHECK=$(printf '%s' "$JOBS" | jq -r --argjson a "$ATTEMPT" --arg rs "$RUN_STARTED" '
+		def ts: if type == "string" and length > 0 then (sub("\\.[0-9]+"; "") | (fromdateiso8601? // null)) else null end;
+		(.jobs // []) as $all
+		| [$all[] | select((.run_attempt // 1) == $a and .conclusion != "skipped")
+			| {s: (.started_at | ts), e: (.completed_at | ts)} | select(.s != null and .e != null)] as $cur
+		| ([$cur[].s] | min) as $first | ([$cur[].e] | max) as $last
+		| [$all[] | select((.run_attempt // 1) != $a and .conclusion != "skipped")
+			| {n: .name, a: (.run_attempt // 1), s: (.started_at | ts), e: (.completed_at | ts)}
+			| select(.s != null and $first != null and .s <= $last and (.e == null or .e > $first))] as $inside
+		| (if $first == null then null else ($rs | ts) as $r | (if $r == null then null else $first - $r end) end) as $q
+		| if ($inside | length) > 0
+			then "job \($inside | map("\(.n) (attempt \(.a))") | join(", ")) of another attempt is inside attempt \($a)\u0027s window."
+			elif $q != null and $q < 0
+			then "the queue before the first job is \($q)s, negative: the attempt\u0027s start is later than its first job."
+			else "ok" end'); then
+		mixed "the jobs could not be told apart by attempt."
+	fi
+	[ "$CHECK" = ok ] || mixed "$CHECK"
+	CARRIED=$(printf '%s' "$JOBS" | jq -r --argjson a "$ATTEMPT" '[(.jobs // [])[] | select((.run_attempt // 1) != $a) | "\(.name) (attempt \(.run_attempt // 1))"] | join(", ")')
+	JOBS_ALL="$JOBS"
+	JOBS=$(printf '%s' "$JOBS" | jq -c --argjson a "$ATTEMPT" '.jobs = [(.jobs // [])[] | select((.run_attempt // 1) == $a)]')
+fi
+
 if ! REPORT=$(printf '%s' "$JOBS" | report); then
 	unreadable "the run's jobs could not be read."
 fi
 
+if [ -n "$CARRIED" ]; then
+	REPORT="$REPORT
+Attempt $ATTEMPT only. Carried over from an earlier attempt (not in the wall): $CARRIED."
+fi
 say "$REPORT"
 write_summary "$REPORT"
 
 # The run has more jobs than the API returned (per_page): the wall covers what was read.
-TOTAL=$(printf '%s' "$JOBS" | jq -r 'if (.total_count|type) == "number" then .total_count else 0 end' 2>/dev/null || echo 0)
-READ=$(printf '%s' "$JOBS" | jq -r '(.jobs // []) | length' 2>/dev/null || echo 0)
+TOTAL=$(printf '%s' "${JOBS_ALL:-$JOBS}" | jq -r 'if (.total_count|type) == "number" then .total_count else 0 end' 2>/dev/null || echo 0)
+READ=$(printf '%s' "${JOBS_ALL:-$JOBS}" | jq -r '(.jobs // []) | length' 2>/dev/null || echo 0)
 TRUNCATED=false
 if [ "${TOTAL:-0}" -gt "${READ:-0}" ] 2>/dev/null; then
 	TRUNCATED=true
