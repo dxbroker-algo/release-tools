@@ -1,0 +1,185 @@
+{
+  "total_count": 19,
+  "jobs": [
+    {
+      "id": 900010001,
+      "name": "Authorize",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-26T13:21:13Z",
+      "started_at": "2026-11-26T13:21:15Z",
+      "completed_at": "2026-11-26T13:21:24Z",
+      "runner_name": "runner-2"
+    },
+    {
+      "id": 900010002,
+      "name": "Deploy (production)",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-26T13:21:12Z",
+      "started_at": "2026-11-26T13:21:12Z",
+      "completed_at": "2026-11-26T13:21:12Z",
+      "runner_name": ""
+    },
+    {
+      "id": 900010003,
+      "name": "Deploy (production, suite skipped)",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-26T13:21:12Z",
+      "started_at": "2026-11-26T13:21:12Z",
+      "completed_at": "2026-11-26T13:21:12Z",
+      "runner_name": ""
+    },
+    {
+      "id": 900010004,
+      "name": "Build (production, for phase=deploy)",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-26T13:21:24Z",
+      "started_at": "2026-11-26T13:21:24Z",
+      "completed_at": "2026-11-26T13:21:24Z",
+      "runner_name": ""
+    },
+    {
+      "id": 900010005,
+      "name": "Bundle (release-bundle-<fe_sha>)",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-26T13:21:24Z",
+      "started_at": "2026-11-26T13:21:24Z",
+      "completed_at": "2026-11-26T13:21:24Z",
+      "runner_name": ""
+    },
+    {
+      "id": 900010006,
+      "name": "Suite / lint & vitest",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-26T13:21:24Z",
+      "started_at": "2026-11-26T13:21:24Z",
+      "completed_at": "2026-11-26T13:21:24Z",
+      "runner_name": ""
+    },
+    {
+      "id": 900010007,
+      "name": "Suite / E2E (Playwright vs dxb-backend api:<be_sha>)",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-26T13:21:24Z",
+      "started_at": "2026-11-26T13:21:24Z",
+      "completed_at": "2026-11-26T13:21:24Z",
+      "runner_name": ""
+    },
+    {
+      "id": 900010008,
+      "name": "Suite / visual regression (all 12 variants)",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-26T13:21:24Z",
+      "started_at": "2026-11-26T13:21:24Z",
+      "completed_at": "2026-11-26T13:21:24Z",
+      "runner_name": ""
+    },
+    {
+      "id": 900010009,
+      "name": "The suite run and its bundle",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-26T13:21:21Z",
+      "started_at": "2026-11-26T13:21:25Z",
+      "completed_at": "2026-11-26T13:21:37Z",
+      "runner_name": "runner-3"
+    },
+    {
+      "id": 900010010,
+      "name": "Deploy (production, the suite run's bundle) / Build (${{ matrix.geo }})",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-26T13:21:38Z",
+      "started_at": "2026-11-26T13:21:38Z",
+      "completed_at": "2026-11-26T13:21:38Z",
+      "runner_name": ""
+    },
+    {
+      "id": 900010011,
+      "name": "Deploy (production, the suite run's bundle) / Geos (${{ inputs.environment }})",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-26T13:21:38Z",
+      "started_at": "2026-11-26T13:21:38Z",
+      "completed_at": "2026-11-26T13:21:38Z",
+      "runner_name": ""
+    },
+    {
+      "id": 900010012,
+      "name": "Deploy (production, the suite run's bundle) / Terraform (production)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-26T13:21:38Z",
+      "started_at": "2026-11-26T13:21:40Z",
+      "completed_at": "2026-11-26T13:22:11Z",
+      "runner_name": "runner-4"
+    },
+    {
+      "id": 900010013,
+      "name": "Publish (platform)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-26T13:22:12Z",
+      "started_at": "2026-11-26T13:22:13Z",
+      "completed_at": "2026-11-26T13:22:46Z",
+      "runner_name": "runner-5"
+    },
+    {
+      "id": 900010014,
+      "name": "Publish (il)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-26T13:22:12Z",
+      "started_at": "2026-11-26T13:22:13Z",
+      "completed_at": "2026-11-26T13:23:05Z",
+      "runner_name": "runner-6"
+    },
+    {
+      "id": 900010015,
+      "name": "Publish (dxb)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-26T13:22:12Z",
+      "started_at": "2026-11-26T13:22:13Z",
+      "completed_at": "2026-11-26T13:22:56Z",
+      "runner_name": "runner-7"
+    },
+    {
+      "id": 900010016,
+      "name": "Cut (tag, GitHub Release, release channel, CHANGELOG)",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-26T13:23:06Z",
+      "started_at": "2026-11-26T13:23:07Z",
+      "completed_at": "2026-11-26T13:24:30Z",
+      "runner_name": "runner-8"
+    },
+    {
+      "id": 900010017,
+      "name": "The suite and the released pair, in the post's thread",
+      "status": "in_progress",
+      "conclusion": null,
+      "created_at": "2026-11-26T13:24:30Z",
+      "started_at": "2026-11-26T13:24:32Z",
+      "completed_at": null,
+      "runner_name": "runner-9"
+    },
+    {
+      "id": 900010018,
+      "name": "Post a failure to the alerts channel",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-26T13:21:13Z",
+      "started_at": "2026-11-26T13:23:06Z",
+      "completed_at": "2026-11-26T13:23:05Z",
+      "runner_name": ""
+    }
+  ]
+}

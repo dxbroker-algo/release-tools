@@ -316,6 +316,47 @@ STUB
 	[ "$status" -eq 2 ]
 }
 
+# The count runs ahead of the listing (S-17): the API counts a job it has not listed yet — the
+# reporter's own job is created last, and the count is updated at once — so the wall is not
+# known until the listing holds every job the run counts. The recorded payload of a
+# phase=deploy release run: 19 jobs counted, 18 listed (the reporter's own job is the one
+# missing).
+DEPLOY="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-deploy.json"
+
+@test "lag: a job the API counts but has not listed is read again until it is listed" {
+	api_stub
+	cp "$DEPLOY" "$SEQ/1.json"
+	# the second read lists the reporter's own job: the listing holds every job the run counts
+	jq '.jobs += [{"id":900010019,"name":"CI time (S-37)","status":"in_progress","conclusion":null,"created_at":"2026-11-26T13:24:38Z","started_at":"2026-11-26T13:24:40Z","completed_at":null,"runner_name":"runner-1"}]' \
+		"$DEPLOY" >"$SEQ/2.json"
+	CI_TIME_NEEDS="" CI_TIME_WAIT_SECONDS=20 run bash "$CI_TIME" --limit 20 --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"reading again"* ]] || false
+	# the wall is the jobs that ran: Authorize 13:21:15 to the Cut 13:24:30. The skipped jobs
+	# are not in it.
+	[[ $output == *"the run's wall is 3m 15s"* ]] || false
+	[[ $output != *"::error::"* ]] || false
+	[ "$(cat "$SEQ/count")" -eq 2 ]
+}
+
+@test "lag: a job the API never lists fails the run closed, with the count named" {
+	api_stub
+	cp "$DEPLOY" "$SEQ/1.json"
+	CI_TIME_NEEDS="" CI_TIME_WAIT_SECONDS=1 run bash "$CI_TIME" --limit 20 --enforce
+	[ "$status" -eq 1 ]
+	[[ $output == *"reading again"* ]] || false
+	[[ $output == *"::error::CI time (S-37): the run has 19 jobs and only 18 were read"* ]] || false
+}
+
+@test "lag: a run with more jobs than one page is not waited on: the listing is truncated, not lagging" {
+	api_stub
+	jq '.total_count = 150' "$JOBS" >"$SEQ/1.json"
+	CI_TIME_WAIT_SECONDS=20 run bash "$CI_TIME" --limit 5 --enforce
+	[ "$status" -eq 1 ]
+	[[ $output == *"only 5 were read"* ]] || false
+	[ "$(cat "$SEQ/count")" -eq 1 ]
+}
+
 # needs scopes the wall (design ci-time-limits A6.1): with CI_TIME_NEEDS set, only the jobs it
 # names are in the wall; every other job is listed apart. Without it, every job that ran counts.
 @test "needs: a job outside needs is listed apart and the wall is unchanged by it" {

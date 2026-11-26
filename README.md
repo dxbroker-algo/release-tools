@@ -549,8 +549,10 @@ did (`if: always()`), and prints what the run cost.
   to an end: a skipped job (GitHub stamps it with a start and a completion at the same instant), a
   job still queued, and the reporter itself (it reads the jobs while it is still running) are left
   out of the wall.
-- **It reads the run's jobs** with the workflow's own `GITHUB_TOKEN` (one API call, inside the
-  workflow, `actions: read`) and prints the table: job, status, start, end, queue, duration.
+- **It reads the run's jobs** with the workflow's own `GITHUB_TOKEN` (inside the workflow,
+  `actions: read`) and prints the table: job, status, start, end, queue, duration. It reads again
+  while the API lags (a job it reports on still running, or a job it counts but has not listed
+  yet), bounded by `CI_TIME_WAIT_SECONDS`.
 - **It is report-only:** it prints a ⚠ line when the wall is over the limit (5 min for a CI run,
   20 min for a prod CD run) and **never fails the run**. The gate turns on at card H (T-1576's
   close), one PR per repo, each merging alone.
@@ -618,11 +620,13 @@ It needs no checkout. Inputs:
 - an invalid `limit` is exit 2 in either mode.
 
 The jobs API can lag the jobs it reports on: a job in `needs:` may still show `in_progress`, or be
-missing, a moment after it finished. Pass the `needs` input (the names of the jobs in the job's
-`needs:`, comma-separated) and the script re-reads the API, backing off, until each reports
-completed, bounded at `CI_TIME_WAIT_SECONDS` (default 60); only then does it judge the wall, and
-under `enforce` it fails closed if the wall is still unknown. Jobs outside `needs:` (stg, post-live)
-are never waited on. Without `needs`, or with a `--jobs` file, it reads once.
+missing, a moment after it finished, and the run's job count can run ahead of the listing (a job
+is counted when it is created and is listed a moment later). The script re-reads the API, backing
+off, until the listing holds every job the run counts and the jobs in `needs:` report completed,
+bounded at `CI_TIME_WAIT_SECONDS` (default 60); only then does it judge the wall, and under
+`enforce` it fails closed if the wall is still unknown. Pass the `needs` input (the names of the
+jobs in the job's `needs:`, comma-separated) to scope the wall; jobs outside `needs:` (stg,
+post-live) are never waited on. With a `--jobs` file it reads once.
 
 `needs` also scopes the wall: with it set, the wall counts only the jobs it names (matched as the
 wait matches them: the exact name, `name (…)`, `name / …`). Every other job is listed apart with
