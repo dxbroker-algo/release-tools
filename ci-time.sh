@@ -6,8 +6,8 @@
 # this run's wall: the time from the first job's start to the last job's end, with the queue
 # before the first job excluded (design §2) and reported apart.
 #
-# One API call — the run's jobs — with the workflow's own GITHUB_TOKEN, inside the workflow:
-# no seat's quota, no second tool. The arithmetic is jq's; this file only reads and prints.
+# The run's jobs, from the API, with the workflow's own GITHUB_TOKEN, inside the workflow (it
+# reads again while the API lags): no seat's quota, no second tool. The arithmetic is jq's.
 #
 # It also checks its own `needs:` (design CI-TIME-SHARED): a job that began or ended after this
 # job started, or is still running or waiting for a runner, is not in this job's `needs:`
@@ -20,11 +20,13 @@
 # CI_TIME_NEEDS every job that ran is in the wall.
 #
 # It does not trust the first read: the jobs API can lag the jobs it reports on (a job in this
-# job's `needs:` still showing in_progress, or missing, a moment after it finished). Given
-# CI_TIME_NEEDS (the names of its `needs:` jobs), it re-reads the API, with backoff, until each of
-# them reports completed, bounded at CI_TIME_WAIT_SECONDS (default 60). Only then does it judge
-# the wall, and fail closed if the wall is still unreadable. Jobs outside `needs:` (stg, post-live)
-# are never waited on. Without CI_TIME_NEEDS, or with a --jobs file, it reads once.
+# job's `needs:` still showing in_progress, or missing, a moment after it finished) and it can
+# count a job it has not listed yet (the count runs ahead of the listing: this job's own record
+# is counted when it is created and is listed a moment later). It re-reads the API, with backoff,
+# until the listing holds every job the run counts and the jobs in `needs:` report completed,
+# bounded at CI_TIME_WAIT_SECONDS (default 60). Only then does it judge the wall, and fail closed
+# if the wall is still unreadable. Jobs outside `needs:` (stg, post-live) are never waited on.
+# With a --jobs file it reads once.
 #
 # It measures the attempt it reports (ruling A17). A rerun (`gh run rerun`, `--failed` or not) is a new
 # attempt of the same run: the jobs counted are the ones that ran in that attempt, the wall is that
@@ -131,6 +133,9 @@ esac
 
 SUMMARY_FILE="${GITHUB_STEP_SUMMARY:-}"
 
+# The jobs API's page: one page holds the listing of one read.
+PER_PAGE=100
+
 # say LINE: the report's line, to the log and to the run's page.
 say() { printf '%s\n' "$1"; }
 
@@ -148,7 +153,7 @@ jobs_json() {
 		-H "Accept: application/vnd.github+json" \
 		-H "X-GitHub-Api-Version: 2022-11-28" \
 		-H "User-Agent: dxb-ci-time" \
-		"${GITHUB_API_URL:-https://api.github.com}/repos/$REPOSITORY/actions/runs/$RUN_ID/jobs?per_page=100"
+		"${GITHUB_API_URL:-https://api.github.com}/repos/$REPOSITORY/actions/runs/$RUN_ID/jobs?per_page=$PER_PAGE"
 }
 
 # The attempt's own start: run_started_at of the run's attempt (the run's first start is attempt 1's).
@@ -382,19 +387,61 @@ settled() {
 	' >/dev/null 2>&1
 }
 
+# listed: the API listed every job the run counts. The count runs ahead of the listing for a
+# moment: a job is counted when it is created and is listed a moment later (the reporter's own
+# job is the last one). The wall is only known when the listing holds every job.
+listed() {
+	printf '%s' "$JOBS" | jq -e '((.total_count // 0) <= ((.jobs // []) | length))' >/dev/null 2>&1
+}
+
+# one_page: the run's jobs fit on one page of the API. More jobs than that is a truncated
+# listing, not a lag: no re-read can complete it, so the wait ends at once.
+one_page() {
+	printf '%s' "$JOBS" | jq -e --argjson page "$PER_PAGE" '((.total_count // 0) <= $page)' >/dev/null 2>&1
+}
+
+# wait_reason: why the read is not the run's own yet, in words.
+wait_reason() {
+	if printf '%s' "$JOBS" | settled; then
+		printf 'the jobs API counted a job it has not listed yet'
+	else
+		printf 'the other jobs have not all reported completed'
+	fi
+}
+
+# final_read: the read is the run's own: every job in needs reports completed, and the listing
+# holds every job the run counts (or the run has more jobs than one page of the API: no re-read
+# can complete that listing, and the count check judges it).
+final_read() {
+	if ! printf '%s' "$JOBS" | settled; then
+		return 1
+	fi
+	if printf '%s' "$JOBS" | listed; then
+		return 0
+	fi
+	if printf '%s' "$JOBS" | one_page; then
+		return 1
+	fi
+	return 0
+}
+
 JOBS=""
 JOBS_RC=0
 JOBS=$(jobs_json) || JOBS_RC=$?
-if [ -z "$JOBS_FILE" ] && [ -n "$NEEDS" ]; then
-	# The API can lag: re-read, backing off, until the other jobs report completed.
+if [ -z "$JOBS_FILE" ]; then
+	# The API can lag twice over: a job it reports on may still show in_progress (or be
+	# missing) a moment after it finished, and it can count a job it has not listed yet (the
+	# reporter's own job is created last, so the count runs ahead of the listing). Read
+	# again, backing off, until the listing holds every job the run counts and the other
+	# jobs report completed.
 	delay=1
-	while ! { [ "$JOBS_RC" -eq 0 ] && printf '%s' "$JOBS" | settled; }; do
+	while ! final_read; do
 		# 2 = no token, repository or run: nothing a re-read would change
 		[ "$JOBS_RC" -ne 2 ] || break
 		[ "$SECONDS" -lt "$WAIT" ] || break
 		left=$((WAIT - SECONDS))
 		[ "$delay" -le "$left" ] || delay=$left
-		say "CI time (S-37): the other jobs have not all reported completed; reading again in ${delay}s."
+		say "CI time (S-37): $(wait_reason); reading again in ${delay}s."
 		sleep "$delay"
 		delay=$((delay * 2))
 		[ "$delay" -le 10 ] || delay=10
@@ -403,6 +450,11 @@ if [ -z "$JOBS_FILE" ] && [ -n "$NEEDS" ]; then
 	done
 	if [ "$JOBS_RC" -eq 0 ] && ! printf '%s' "$JOBS" | settled; then
 		say "⚠ CI time (S-37): after ${WAIT}s the jobs API still shows a job in needs ($NEEDS) unfinished or missing."
+	fi
+	if [ "$JOBS_RC" -eq 0 ] && ! printf '%s' "$JOBS" | listed; then
+		if printf '%s' "$JOBS" | one_page; then
+			say "⚠ CI time (S-37): after ${WAIT}s the jobs API still counts a job it has not listed."
+		fi
 	fi
 fi
 if [ "$JOBS_RC" -ne 0 ]; then
