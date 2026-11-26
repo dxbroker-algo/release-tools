@@ -6,6 +6,14 @@
 CI_TIME="$BATS_TEST_DIRNAME/../ci-time.sh"
 JOBS="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs.json"
 
+# The suite is deterministic: the attempt comes from --attempt, never from the environment.
+# Actions sets GITHUB_RUN_ATTEMPT for the job that runs these tests, and the script then
+# measures an attempt nobody asked for: the fixture's jobs land in another attempt, and the
+# attempt's own start costs the API stub one more read.
+setup() {
+	unset GITHUB_RUN_ATTEMPT
+}
+
 # The report over the fixture, with the limit LIMIT
 report() {
 	local limit=${1:-5}
