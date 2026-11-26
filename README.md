@@ -560,6 +560,22 @@ did (`if: always()`), and prints what the run cost.
   the job's name. (Every job in `needs:` has completed when the time job starts, so any other job that is running,
   waiting for a runner, or ended later is named; a skipped job is not. If the time job cannot tell
   which job it is, the line says it did not look.)
+- **It measures the attempt it reports.** A rerun (`gh run rerun`, `--failed` or not) is a new attempt of
+  the same run: its own jobs, from its first job's start to its last job's end, with the queue from the
+  attempt's own start (`run_started_at` of that attempt) reported apart. A `--failed` rerun keeps the jobs
+  an earlier attempt passed, and GitHub lists them again with the new attempt's number but the earlier
+  attempt's times, so the attempt number alone cannot tell them apart — their times do: a job that ran
+  before this attempt began is a job an earlier attempt ran. Those jobs are kept apart and named.
+
+- **A re-run reads two walls, and the larger one is the wall of the run.** The attempt's own wall, and
+  the kept wall: the jobs the attempt kept from an earlier attempt, from the first one's start to the
+  last one's end, with their own times. An attempt that ran nothing of its own has the kept wall as its
+  wall, never 0. The report prints both ("This attempt's own jobs: …", "Kept from an earlier attempt: …"),
+  and the `::error::` line names the wall that failed. A re-use is never a failure for the re-use itself:
+  no negative queue, and the run goes on when the wall is under the limit.
+  The kept wall can over-read — jobs kept from two earlier attempts span the gap between them, so the wall
+  of a run that was fine can read over the limit. The way out is a full re-run (`gh run rerun`, not
+  `--failed`), which measures every job as one attempt.
 
 ### Use it from a repository
 
@@ -594,7 +610,8 @@ It needs no checkout. Inputs:
 **`enforce`.** With `"false"` (the default) the action only reports and always exits 0. With
 `"true"` the same script that prints the table also decides:
 
-- the wall is over `limit`: it exits 1 with an `::error::` line naming the wall and the limit;
+- the wall is over `limit`: it exits 1 with an `::error::` line naming the wall, the limit, and which
+  of the two walls it was (the attempt's own jobs, or the jobs it kept from an earlier attempt);
 - it fails closed, also exit 1 with an `::error::` line: the run's jobs could not be read (no
   token, an API error), no job ran, or the API returned fewer jobs than the run has, so the wall
   is not known;

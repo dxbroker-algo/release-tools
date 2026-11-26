@@ -6,6 +6,14 @@
 CI_TIME="$BATS_TEST_DIRNAME/../ci-time.sh"
 JOBS="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs.json"
 
+# The suite is deterministic: the attempt comes from --attempt, never from the environment.
+# Actions sets GITHUB_RUN_ATTEMPT for the job that runs these tests, and the script then
+# measures an attempt nobody asked for: the fixture's jobs land in another attempt, and the
+# attempt's own start costs the API stub one more read.
+setup() {
+	unset GITHUB_RUN_ATTEMPT
+}
+
 # The report over the fixture, with the limit LIMIT
 report() {
 	local limit=${1:-5}
@@ -362,13 +370,16 @@ rerun_jobs() {
 JSON
 }
 
-@test "a --failed rerun has the wall of attempt 2's jobs, not the carried-over ones" {
+@test "a --failed rerun reads the larger of the attempt's own wall and the kept jobs' wall" {
 	rerun_jobs
 	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/jobs.json" --attempt 2 --run-started-at 2026-11-24T15:20:15Z
 	[ "$status" -eq 0 ]
-	[[ $output == *"the run's wall is 1m 00s"* ]] || false
+	# The attempt's own jobs ran 15:20:30-15:21:30 (1m 00s); the job it kept ran 10:00:05-10:02:00
+	# (1m 55s). The wall of the run is the larger of the two.
+	[[ $output == *"the run's wall is 1m 55s"* ]] || false
+	[[ $output == *"This attempt's own jobs: 1m 00s (15:20:30 → 15:21:30)."* ]] || false
+	[[ $output == *"Kept from an earlier attempt: 1m 55s (10:00:05 → 10:02:00) — build (attempt 1)."* ]] || false
 	[[ $output == *"Queue before the first job: 15s (excluded from the wall)."* ]] || false
-	[[ $output == *"Carried over from an earlier attempt (not in the wall): build (attempt 1)."* ]] || false
 	[[ $output != *"| build |"* ]] || false
 }
 
@@ -387,7 +398,7 @@ JSON
 	[ "$status" -eq 0 ]
 	[[ $output == *"the run's wall is 3m 00s"* ]] || false
 	[[ $output == *"Queue before the first job: 15s"* ]] || false
-	[[ $output != *"Carried over"* ]] || false
+	[[ $output != *"Kept from an earlier attempt"* ]] || false
 }
 
 @test "attempt 1 is unchanged: the same wall with or without the attempt" {
@@ -398,20 +409,105 @@ JSON
 	[ "$output" = "$without" ]
 }
 
-@test "a window mixing attempts is refused: mixed attempts, no wall, the run is failed" {
-	# attempt 1's job overlaps attempt 2's window
+@test "a job of another attempt is left out of this attempt's own wall, and read as a kept job" {
+	# attempt 1's job overlaps attempt 2's window: it is not this attempt's job, so it is
+	# kept apart and measured with its own times. The attempt's own wall is unchanged; the
+	# kept wall is that job's own span, and it is read.
 	rerun_jobs
 	jq '.jobs[0].completed_at = "2026-11-24T15:21:00Z"' "$BATS_TEST_TMPDIR/jobs.json" >"$BATS_TEST_TMPDIR/mixed.json"
-	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/mixed.json" --attempt 2 --run-started-at 2026-11-24T15:20:15Z
+	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/mixed.json" --attempt 2 --run-started-at 2026-11-24T15:20:15Z --enforce
 	[ "$status" -eq 1 ]
-	[[ $output == *"mixed attempts: job build (attempt 1) of another attempt is inside attempt 2's window."* ]] || false
-	[[ $output != *"the run's wall is"* ]] || false
+	[[ $output == *"This attempt's own jobs: 1m 00s (15:20:30 → 15:21:30)."* ]] || false
+	[[ $output == *"Kept from an earlier attempt: 5h 20m 55s (10:00:05 → 15:21:00) — build (attempt 1)."* ]] || false
+	[[ $output == *"::error::CI time (S-37): the run's wall is 5h 20m 55s, over the 5 min limit. It is the wall of the jobs kept from an earlier attempt"* ]] || false
+	[[ $output != *"mixed attempts"* ]] || false
 }
 
-@test "a negative queue is refused as mixed attempts, enforced or not" {
+@test "a queue that would be negative is measured from the jobs' own creation, and the run goes on" {
+	# a start later than the jobs (a hand-run with a wrong --run-started-at): the queue is
+	# never negative and the run is not failed.
 	rerun_jobs
-	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/jobs.json" --attempt 2 --run-started-at 2026-11-24T15:25:00Z
+	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/jobs.json" --attempt 2 --run-started-at 2026-11-24T15:25:00Z --enforce
+	[ "$status" -eq 0 ]
+	# The kept job's own span (1m 55s) is the larger of the two walls.
+	[[ $output == *"the run's wall is 1m 55s"* ]] || false
+	[[ $output == *"Queue before the first job: 10s (excluded from the wall)."* ]] || false
+	[[ $output != *"-270s"* ]] || false
+	[[ $output != *"mixed attempts"* ]] || false
+}
+
+# The recorded payload of a --failed rerun (invented ids): GitHub lists the jobs an earlier
+# attempt passed again under the new attempt's number, with the earlier attempt's start and end
+# (only the creation is re-stamped to the new attempt). The attempt number cannot tell them
+# apart; their times can.
+RERUN="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-rerun.json"
+# The same two-attempt payload, with the kept jobs spanning past the limit: the attempt ran
+# nothing of its own, and the jobs it kept ran 02:43:32-02:56:30 (12m 58s).
+LAUNDER="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-rerun-launder.json"
+
+@test "a --failed rerun: the wall is the attempt's own jobs, the kept ones are named apart" {
+	run bash "$CI_TIME" --jobs "$RERUN" --attempt 2 --run-started-at 2026-11-26T02:53:27Z
+	[ "$status" -eq 0 ]
+	# The attempt's own jobs ran 02:53:52 (Select tests) to 02:59:28 (Staging gate): 5m 36s.
+	# The six jobs the earlier attempt passed kept their times: their own span is 1m 01s.
+	[[ $output == *"the run's wall is 5m 36s"* ]] || false
+	[[ $output == *"This attempt's own jobs: 5m 36s (02:53:52 → 02:59:28)."* ]] || false
+	[[ $output == *"Kept from an earlier attempt: 1m 01s (02:43:32 → 02:44:33) — Terraform plan (prod, read-only) (an earlier attempt), Terraform test (stack module) (an earlier attempt), Twilio config (dry-run, stg and prod) (an earlier attempt), Infra change gate (an earlier attempt), Type check (mypy) (an earlier attempt), Static checks (an earlier attempt)."* ]] || false
+	[[ $output == *"Queue before the first job: 25s (excluded from the wall)."* ]] || false
+	[[ $output != *"| Static checks |"* ]] || false
+	[[ $output != *"| Type check (mypy) |"* ]] || false
+	[[ $output != *"| Terraform test (stack module) |"* ]] || false
+	[[ $output != *"| Twilio config (dry-run, stg and prod) |"* ]] || false
+	[[ $output != *"| Infra change gate |"* ]] || false
+	[[ $output != *"| Terraform plan (prod, read-only) |"* ]] || false
+}
+
+@test "a --failed rerun is never a failure for the re-use: the run goes on and the gate reads the attempt's wall" {
+	run bash "$CI_TIME" --jobs "$RERUN" --attempt 2 --run-started-at 2026-11-26T02:53:27Z --limit 10 --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 5m 36s — under the 10 min limit."* ]] || false
+	[[ $output != *"::error::"* ]] || false
+	[[ $output != *"mixed attempts"* ]] || false
+}
+
+@test "a --failed rerun over the limit fails the run on the attempt's own wall" {
+	run bash "$CI_TIME" --jobs "$RERUN" --attempt 2 --run-started-at 2026-11-26T02:53:27Z --limit 5 --enforce
 	[ "$status" -eq 1 ]
-	[[ $output == *"mixed attempts: the queue before the first job is -270s, negative"* ]] || false
-	[[ $output != *"the run's wall is"* ]] || false
+	[[ $output == *"::error::CI time (S-37): the run's wall is 5m 36s, over the 5 min limit."* ]] || false
+	[[ $output != *"mixed attempts"* ]] || false
+}
+
+@test "without an attempt, every job counts, as before" {
+	run bash "$CI_TIME" --jobs "$RERUN" --limit 5
+	[ "$status" -eq 0 ]
+	# The whole listing, the earliest job (02:43:32, an earlier attempt's) to the last end.
+	[[ $output == *"the run's wall is 15m 56s"* ]] || false
+	[[ $output == *"Queue before the first job: 0s (excluded from the wall)."* ]] || false
+	[[ $output != *"Carried over"* ]] || false
+}
+
+@test "a rerun that ran nothing of its own reads the kept jobs' wall" {
+	# The re-run kept every other job from the earlier attempt and ran nothing of its own:
+	# the kept jobs' wall is the wall of the run (never 0), and it is under the limit.
+	local f="$BATS_TEST_TMPDIR/rerun-only-self.json"
+	jq '{total_count: 4, jobs: [.jobs[] | select(.name == "CI time (S-37)" or .id == 900004 or .id == 900007 or .id == 900008)]}' \
+		"$RERUN" >"$f"
+	run bash "$CI_TIME" --jobs "$f" --attempt 2 --run-started-at 2026-11-26T02:53:27Z --limit 5 --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 1m 01s"* ]] || false
+	[[ $output == *"This attempt's own jobs: none ran to an end."* ]] || false
+	[[ $output == *"Kept from an earlier attempt: 1m 01s (02:43:32 → 02:44:33)"* ]] || false
+	[[ $output != *"::error::"* ]] || false
+	[[ $output != *"no job ran in this run"* ]] || false
+}
+
+@test "a rerun whose kept jobs span past the limit fails the run on the kept wall" {
+	# The re-use is not the failure: the kept jobs' own span is, and the error says so.
+	run bash "$CI_TIME" --jobs "$LAUNDER" --attempt 2 --run-started-at 2026-11-26T02:59:00Z --limit 5 --enforce
+	[ "$status" -eq 1 ]
+	[[ $output == *"the run's wall is 12m 58s"* ]] || false
+	[[ $output == *"This attempt's own jobs: none ran to an end."* ]] || false
+	[[ $output == *"Kept from an earlier attempt: 12m 58s (02:43:32 → 02:56:30)"* ]] || false
+	[[ $output == *"::error::CI time (S-37): the run's wall is 12m 58s, over the 5 min limit. It is the wall of the jobs kept from an earlier attempt; the way out is a full re-run (gh run rerun, not --failed)"* ]] || false
+	[[ $output != *"mixed attempts"* ]] || false
 }
