@@ -7,8 +7,11 @@ description: >-
   silently. Report-only by default; with `enforce: "true"` it fails the run when the wall is over
   the limit, and fails closed when the run's jobs cannot be read. Run it as the last job, `if: always()`, with
   `needs:` every other job and `permissions: actions: read`. A rerun is measured on its own attempt
-  (`GITHUB_RUN_ATTEMPT`): the jobs an earlier attempt passed and this one kept are left out of the
-  wall and named apart, and the queue is from the attempt's own start. A re-use is never a failure.
+  (`GITHUB_RUN_ATTEMPT`): the queue is from the attempt's own start, and the report reads two walls
+  - the attempt's own jobs, and the jobs it kept from an earlier attempt (measured with their own
+  times) - of which the larger one is the wall of the run. A re-use is never a failure for the
+  re-use itself; the kept wall can over-read, and the way out is a full re-run (`gh run rerun`, not
+  `--failed`).
 inputs:
   limit:
     description: "The limit in minutes: 5 for a CI run, 20 for a prod CD run."

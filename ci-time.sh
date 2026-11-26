@@ -34,8 +34,16 @@
 # A `--failed` rerun keeps the jobs an earlier attempt passed, and GitHub lists them again with the new
 # attempt's number (run_attempt) and the earlier attempt's times: only their created_at is re-stamped to
 # the new attempt. So the attempt number does not tell them apart; their times do: a job that ran before
-# this attempt began is a job an earlier attempt ran. Those jobs are left out of the wall and named
-# apart. A rerun is never a failure: the wall is measured and the run goes on.
+# this attempt began is a job an earlier attempt ran. Those jobs are kept apart and named.
+#
+# Two walls, and the larger one is the run's wall: this attempt's own wall (its own jobs, from the first
+# one's start to the last one's end) and the kept wall (the jobs it kept, from the first one's start to
+# the last one's end, with their own times). An attempt that ran nothing of its own has the kept wall as
+# its wall, never 0. A re-use is never a failure for the re-use itself: the report names both walls.
+#
+# The kept wall can over-read: jobs kept from two earlier attempts span the gap between them, so the
+# wall of a run that was fine can read over the limit. The way out is a full re-run (`gh run rerun`, not
+# `--failed`), which measures every job as one attempt.
 #
 # REPORT-ONLY by default: it prints its table and its ⚠ line and exits 0, whatever it reads.
 # With --enforce (CI_TIME_ENFORCE=true; design ci-time-limits A4) the same script is the gate:
@@ -173,6 +181,8 @@ report() {
 		--arg needs "$NEEDS" \
 		--arg run_started "$RUN_STARTED" \
 		--arg carried "${CARRIED_COUNT:-0}" \
+		--arg carried_names "${CARRIED:-}" \
+		--argjson kept "${KEPT:-[]}" \
 		'
 		def ts:
 			if type == "string" and length > 0
@@ -227,18 +237,51 @@ report() {
 		| ($rows_all - $outside) as $rows
 		| ([$rows[] | select(.ran) | .start] | min) as $first
 		| ([$rows[] | select(.ran) | .end] | max) as $last
-		# An attempt that re-used the jobs of an earlier attempt and ran nothing of its own has
-		# a known wall of 0: the jobs it kept are not in its wall, and the jobs it ran are
-		# measured with their own times. (A truncated listing is caught by the reader, before
-		# this.)
+		# The own wall of this attempt: its own jobs, from the first start to the last end.
+		| (if $first == null then null
+		   elif $last < $first then 0 else $last - $first end) as $own_wall
+		| (if $first == null then null
+		   else ($rows | map(select(.ran)) | sort_by(.start) | .[0] | clock(.start_iso)) end) as $own_first_clock
+		| (if $last == null then null
+		   else ($rows | map(select(.ran)) | sort_by(.end) | .[-1] | clock(.end_iso)) end) as $own_last_clock
+		# The kept jobs: the jobs an earlier attempt ran and this attempt kept. They keep the
+		# times of that earlier attempt, so the kept wall is their own span, among themselves.
+		| ($kept | map({
+			name: (.name // "(unnamed)"),
+			conclusion: (.conclusion // ""),
+			start_iso: (if (.started_at|type) == "string" then .started_at else "" end),
+			end_iso: (if (.completed_at|type) == "string" then .completed_at else "" end),
+			start: (.started_at | ts),
+			end: (.completed_at | ts)
+		})) as $kept_jobs
+		| ($kept_jobs | map(select(($names | length) == 0 or (.name | in_needs($names)))
+			| select(.start != null and .end != null and .conclusion != "skipped"))) as $kept_ran
+		| ([$kept_ran[].start] | min) as $kept_first
+		| ([$kept_ran[].end] | max) as $kept_last
+		| (if $kept_first == null then null
+		   elif $kept_last < $kept_first then 0 else $kept_last - $kept_first end) as $kept_wall
+		| (if $kept_first == null then null
+		   else ($kept_ran | sort_by(.start) | .[0] | clock(.start_iso)) end) as $kept_first_clock
+		| (if $kept_last == null then null
+		   else ($kept_ran | sort_by(.end) | .[-1] | clock(.end_iso)) end) as $kept_last_clock
 		# A job of this attempt that has not finished yet means the wall is not final: it is
 		# not known, and the reporter itself never counts (it reads the jobs while it runs).
 		| ([$rows[] | select(.status != "completed"
 			and ($self == null or ((.id + "/" + .name) != ($self.id + "/" + $self.name))))] | length) as $unfinished
-		| (($carried|tonumber) > 0 and $unfinished == 0) as $carried_only
-		| (if $first == null then (if $carried_only then 0 else null end)
-		   elif $last < $first then 0 else $last - $first end) as $wall
-		| ($first == null and $carried_only) as $empty_attempt
+		# The wall of the run: the larger of the own wall of this attempt and the kept wall.
+		# An attempt that ran nothing of its own has the kept wall as its wall, never 0.
+		| (if $own_wall == null and $unfinished > 0 and (($carried|tonumber) > 0)
+			then null
+			elif $own_wall == null and $kept_wall == null and (($carried|tonumber) > 0)
+			then 0
+			elif $own_wall == null then $kept_wall
+			elif $kept_wall == null then $own_wall
+			elif $kept_wall > $own_wall then $kept_wall
+			else $own_wall end) as $wall
+		| (if $own_wall == null then "kept"
+			elif $kept_wall == null then "own"
+			elif $kept_wall > $own_wall then "kept"
+			else "own" end) as $wall_which
 		| ([$rows[] | select(.created != null) | .created]|min) as $earliest
 		| ($run_started | ts) as $attempt_start
 		| (if $first == null then null
@@ -254,14 +297,18 @@ report() {
 		| ($limit|tonumber) as $limit_min
 		| ($limit_min * 60) as $limit_s
 		| (if $wall != null and $wall > $limit_s then true else false end) as $over
+		| (if (($carried|tonumber) > 0)
+			then (if $wall_which == "kept" then " (the wall of the jobs kept from an earlier attempt)"
+				else " (the wall of this attempt\u0027s own jobs)" end)
+			else "" end) as $which_note
 		| (if $wall == null
 			then (if (($carried|tonumber) > 0)
 				then "CI time (S-37): the wall of this attempt is not known: a job of it has not finished."
 				else "CI time (S-37): no job ran in this run — there is no wall to report."
 				end)
 			elif $over
-			then "⚠ CI time (S-37): the run\u0027s wall is \(($wall)|dur) — OVER the \($limit_min) min limit.\(if $enforce == "true" then " This run is failed." else " REPORT-ONLY: this run is not failed." end)"
-			else "CI time (S-37): the run\u0027s wall is \(($wall)|dur) — under the \($limit_min) min limit." end) as $verdict
+			then "⚠ CI time (S-37): the run\u0027s wall is \(($wall)|dur) — OVER the \($limit_min) min limit.\(if $enforce == "true" then " This run is failed." else " REPORT-ONLY: this run is not failed." end)\($which_note)"
+			else "CI time (S-37): the run\u0027s wall is \(($wall)|dur) — under the \($limit_min) min limit.\($which_note)" end) as $verdict
 		| (if $queue_before == null
 			then ""
 			elif $queue_before > 60
@@ -283,10 +330,12 @@ report() {
 			else ["", "outside this job\u0027s needs (not in the wall):", "",
 				"| job | status | start (UTC) | end (UTC) | queue | duration |",
 				"| --- | --- | --- | --- | --- | --- |"] + ($outside | map(row_text)) end)
-		+ ["", $verdict, $queue_line]
-		+ (if $empty_attempt
-			then ["This attempt ran no job to an end: its wall is 0. The jobs it re-used were measured with their own attempt."]
-			else [] end)
+		+ ["", $verdict]
+		+ (if (($carried|tonumber) > 0) then [
+			"This attempt\u0027s own jobs: \(if $own_wall == null then "none ran to an end" else (($own_wall)|dur) + " (" + $own_first_clock + " → " + $own_last_clock + ")" end).",
+			"Kept from an earlier attempt: \(if $kept_wall == null then "none ran to an end" else (($kept_wall)|dur) + " (" + $kept_first_clock + " → " + $kept_last_clock + ")" end)\(if $carried_names != "" then " — " + $carried_names else "" end)."
+		] else [] end)
+		+ [$queue_line]
 		+ (if $needs_line == "" then [] else [$needs_line] end)) | join("\n")
 		'
 }
@@ -297,10 +346,12 @@ write_summary() {
 	{
 		printf '%s\n\n' "$1"
 		printf 'The wall is from the first job\u0027s start to the last job\u0027s end; the queue before the\n'
+		printf 'first job is excluded. A re-run reads the larger of that attempt\u0027s own wall and the\n'
+		printf 'wall of the jobs it kept from an earlier attempt.\n'
 		if [ "$ENFORCE" = true ]; then
-			printf 'first job is excluded. The limit is %s min, enforced: a wall over it fails this run.\n' "$LIMIT"
+			printf 'The limit is %s min, enforced: a wall over it fails this run.\n' "$LIMIT"
 		else
-			printf 'first job is excluded. The limit is %s min. REPORT-ONLY — this run is not failed.\n' "$LIMIT"
+			printf 'The limit is %s min. REPORT-ONLY — this run is not failed.\n' "$LIMIT"
 		fi
 	} >>"$SUMMARY_FILE"
 }
@@ -362,6 +413,7 @@ fi
 # this one kept are named apart (they were measured with their own attempt).
 CARRIED=""
 CARRIED_COUNT=0
+KEPT="[]"
 if [ -n "$ATTEMPT" ]; then
 	if [ -z "$RUN_STARTED" ] && [ -z "$JOBS_FILE" ]; then
 		RUN_STARTED=$(run_started_at 2>/dev/null) || RUN_STARTED=""
@@ -420,6 +472,7 @@ if [ -n "$ATTEMPT" ]; then
 	JOBS_ALL="$JOBS"
 	JOBS=$(printf '%s' "$SPLIT" | jq -c '{total_count: .total_count, jobs: .jobs}')
 	CARRIED_COUNT=$(printf '%s' "$SPLIT" | jq -r '(.carried // []) | length')
+	KEPT=$(printf '%s' "$SPLIT" | jq -c '(.carried // [])')
 	CARRIED=$(printf '%s' "$SPLIT" | jq -r --argjson a "$ATTEMPT" '
 		[.carried[]
 			| "\(.name // "(unnamed)")\((if (.run_attempt // 1) != $a then " (attempt \(.run_attempt // 1))" else " (an earlier attempt)" end))"]
@@ -430,10 +483,6 @@ if ! REPORT=$(printf '%s' "$JOBS" | report); then
 	unreadable "the run's jobs could not be read."
 fi
 
-if [ -n "$CARRIED" ]; then
-	REPORT="$REPORT
-Attempt $ATTEMPT only. Carried over from an earlier attempt (not in the wall): $CARRIED."
-fi
 say "$REPORT"
 write_summary "$REPORT"
 
@@ -469,7 +518,18 @@ if [ "$ENFORCE" = true ]; then
 		;;
 	*"— OVER the "*)
 		WALL=$(printf '%s\n' "$REPORT" | sed -n "s/.*the run's wall is \(.*\) — OVER the \(.*\) min limit\..*/\1/p" | head -n 1)
-		say "::error::CI time (S-37): the run's wall is ${WALL:-over the limit}, over the $LIMIT min limit."
+		# The error names the wall that failed: this attempt's own jobs, or the jobs it kept.
+		case "$REPORT" in
+		*"the wall of the jobs kept from an earlier attempt"*)
+			say "::error::CI time (S-37): the run's wall is ${WALL:-over the limit}, over the $LIMIT min limit. It is the wall of the jobs kept from an earlier attempt; the way out is a full re-run (gh run rerun, not --failed), which measures every job as one attempt."
+			;;
+		*"the wall of this attempt's own jobs"*)
+			say "::error::CI time (S-37): the run's wall is ${WALL:-over the limit}, over the $LIMIT min limit. It is the wall of this attempt's own jobs."
+			;;
+		*)
+			say "::error::CI time (S-37): the run's wall is ${WALL:-over the limit}, over the $LIMIT min limit."
+			;;
+		esac
 		exit 1
 		;;
 	esac
