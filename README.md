@@ -560,6 +560,13 @@ did (`if: always()`), and prints what the run cost.
   the job's name. (Every job in `needs:` has completed when the time job starts, so any other job that is running,
   waiting for a runner, or ended later is named; a skipped job is not. If the time job cannot tell
   which job it is, the line says it did not look.)
+- **It measures the attempt it reports.** A rerun (`gh run rerun`, `--failed` or not) is a new attempt of
+  the same run, and the wall is that attempt's: its own jobs, from its first job's start to its last job's
+  end, with the queue from the attempt's own start (`run_started_at` of that attempt) reported apart. A
+  `--failed` rerun keeps the jobs an earlier attempt passed, and GitHub lists them again with the new
+  attempt's number but the earlier attempt's times, so the attempt number alone cannot tell them apart —
+  their times do: a job that ran before this attempt began is a job an earlier attempt ran. Those jobs are
+  left out of the wall and named apart. A re-use is never a failure: the wall is measured and the run goes on.
 
 ### Use it from a repository
 

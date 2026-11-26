@@ -398,20 +398,86 @@ JSON
 	[ "$output" = "$without" ]
 }
 
-@test "a window mixing attempts is refused: mixed attempts, no wall, the run is failed" {
-	# attempt 1's job overlaps attempt 2's window
+@test "a job of another attempt is left out of the wall, not a failure" {
+	# attempt 1's job overlaps attempt 2's window: it is not this attempt's job, so it is
+	# named apart and the wall is attempt 2's. A rerun is never a failure.
 	rerun_jobs
 	jq '.jobs[0].completed_at = "2026-11-24T15:21:00Z"' "$BATS_TEST_TMPDIR/jobs.json" >"$BATS_TEST_TMPDIR/mixed.json"
-	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/mixed.json" --attempt 2 --run-started-at 2026-11-24T15:20:15Z
-	[ "$status" -eq 1 ]
-	[[ $output == *"mixed attempts: job build (attempt 1) of another attempt is inside attempt 2's window."* ]] || false
-	[[ $output != *"the run's wall is"* ]] || false
+	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/mixed.json" --attempt 2 --run-started-at 2026-11-24T15:20:15Z --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 1m 00s"* ]] || false
+	[[ $output == *"Carried over from an earlier attempt (not in the wall): build (attempt 1)."* ]] || false
+	[[ $output != *"mixed attempts"* ]] || false
+	[[ $output != *"::error::"* ]] || false
 }
 
-@test "a negative queue is refused as mixed attempts, enforced or not" {
+@test "a queue that would be negative is measured from the jobs' own creation, and the run goes on" {
+	# a start later than the jobs (a hand-run with a wrong --run-started-at): the queue is
+	# never negative and the run is not failed.
 	rerun_jobs
-	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/jobs.json" --attempt 2 --run-started-at 2026-11-24T15:25:00Z
+	run bash "$CI_TIME" --jobs "$BATS_TEST_TMPDIR/jobs.json" --attempt 2 --run-started-at 2026-11-24T15:25:00Z --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 1m 00s"* ]] || false
+	[[ $output == *"Queue before the first job: 10s (excluded from the wall)."* ]] || false
+	[[ $output != *"-270s"* ]] || false
+	[[ $output != *"mixed attempts"* ]] || false
+}
+
+# The recorded payload of a --failed rerun (invented ids): GitHub lists the jobs an earlier
+# attempt passed again under the new attempt's number, with the earlier attempt's start and end
+# (only the creation is re-stamped to the new attempt). The attempt number cannot tell them
+# apart; their times can.
+RERUN="$BATS_TEST_DIRNAME/fixtures/ci-time-jobs-rerun.json"
+
+@test "a --failed rerun: the wall is the attempt's own jobs, the carried-over ones are named apart" {
+	run bash "$CI_TIME" --jobs "$RERUN" --attempt 2 --run-started-at 2026-11-26T02:53:27Z
+	[ "$status" -eq 0 ]
+	# The attempt's own jobs ran 02:53:52 (Select tests) to 02:59:28 (Staging gate): 5m 36s.
+	# The six jobs the earlier attempt passed kept their times and are not in the wall.
+	[[ $output == *"the run's wall is 5m 36s"* ]] || false
+	[[ $output == *"Queue before the first job: 25s (excluded from the wall)."* ]] || false
+	[[ $output == *"Carried over from an earlier attempt (not in the wall): Terraform plan (prod, read-only) (an earlier attempt), Terraform test (stack module) (an earlier attempt), Twilio config (dry-run, stg and prod) (an earlier attempt), Infra change gate (an earlier attempt), Type check (mypy) (an earlier attempt), Static checks (an earlier attempt)."* ]] || false
+	[[ $output != *"| Static checks |"* ]] || false
+	[[ $output != *"| Type check (mypy) |"* ]] || false
+	[[ $output != *"| Terraform test (stack module) |"* ]] || false
+	[[ $output != *"| Twilio config (dry-run, stg and prod) |"* ]] || false
+	[[ $output != *"| Infra change gate |"* ]] || false
+	[[ $output != *"| Terraform plan (prod, read-only) |"* ]] || false
+}
+
+@test "a --failed rerun is never a failure for the re-use: the run goes on and the gate reads the attempt's wall" {
+	run bash "$CI_TIME" --jobs "$RERUN" --attempt 2 --run-started-at 2026-11-26T02:53:27Z --limit 10 --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 5m 36s — under the 10 min limit."* ]] || false
+	[[ $output != *"::error::"* ]] || false
+	[[ $output != *"mixed attempts"* ]] || false
+}
+
+@test "a --failed rerun over the limit fails the run on the attempt's own wall" {
+	run bash "$CI_TIME" --jobs "$RERUN" --attempt 2 --run-started-at 2026-11-26T02:53:27Z --limit 5 --enforce
 	[ "$status" -eq 1 ]
-	[[ $output == *"mixed attempts: the queue before the first job is -270s, negative"* ]] || false
-	[[ $output != *"the run's wall is"* ]] || false
+	[[ $output == *"::error::CI time (S-37): the run's wall is 5m 36s, over the 5 min limit."* ]] || false
+	[[ $output != *"mixed attempts"* ]] || false
+}
+
+@test "without an attempt, every job counts, as before" {
+	run bash "$CI_TIME" --jobs "$RERUN" --limit 5
+	[ "$status" -eq 0 ]
+	# The whole listing, the earliest job (02:43:32, an earlier attempt's) to the last end.
+	[[ $output == *"the run's wall is 15m 56s"* ]] || false
+	[[ $output == *"Queue before the first job: 0s (excluded from the wall)."* ]] || false
+	[[ $output != *"Carried over"* ]] || false
+}
+
+@test "a rerun whose own jobs are only this one: a known wall of 0, not a failure" {
+	# The re-run kept every other job from the earlier attempt and ran nothing of its own:
+	# the wall of this attempt is 0, and the run goes on.
+	local f="$BATS_TEST_TMPDIR/rerun-only-self.json"
+	jq '{total_count: 4, jobs: [.jobs[] | select(.name == "CI time (S-37)" or .id == 900004 or .id == 900007 or .id == 900008)]}' \
+		"$RERUN" >"$f"
+	run bash "$CI_TIME" --jobs "$f" --attempt 2 --run-started-at 2026-11-26T02:53:27Z --limit 5 --enforce
+	[ "$status" -eq 0 ]
+	[[ $output == *"the run's wall is 0s"* ]] || false
+	[[ $output != *"::error::"* ]] || false
+	[[ $output != *"no job ran in this run"* ]] || false
 }
